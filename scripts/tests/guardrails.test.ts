@@ -1,3 +1,6 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { ESLint } from 'eslint';
 import { describe, expect, it } from 'vitest';
 import { ENV_KEYS } from '../../apps/server/src/config/env.js';
@@ -46,7 +49,7 @@ describe('M0 ESLint guardrails', () => {
     {
       rule: 'G-03c',
       file: 'apps/server/src/runtime/probe.ts',
-      blocked: ['better-sqlite3', 'fastify', 'openai', '../db/smoke.js', '../config/env.js'],
+      blocked: ['better-sqlite3', 'fastify', 'openai'],
       allowed: ['@mini-agent-run/shared', './interfaces.js'],
     },
   ])('$rule enforces the import boundary in $file', async ({ file, blocked, allowed }) => {
@@ -64,6 +67,22 @@ describe('M0 ESLint guardrails', () => {
 
     expect(await lintRuleIds(file, 'void import("node:fs");')).toContain('no-restricted-syntax');
     expect(await lintRuleIds(file, 'void import("vue");')).toEqual([]);
+  });
+
+  it('G-03c resolves equivalent Runtime import paths before checking the boundary', async () => {
+    const file = 'apps/server/src/runtime/probe.ts';
+
+    for (const specifier of ['../db/smoke.js', './../db/smoke.js', './../config/env.js']) {
+      expect(await lintRuleIds(file, 'import ' + JSON.stringify(specifier) + ';'))
+        .toEqual(['workspace/runtime-boundary']);
+    }
+    expect(await lintRuleIds(file, 'void import("./../db/smoke.js");'))
+      .toEqual(['workspace/runtime-boundary']);
+    expect(await lintRuleIds(
+      'apps/server/src/runtime/nested/probe.ts',
+      'export { checkSqliteSmoke } from "./../../db/smoke.js";',
+    )).toEqual(['workspace/runtime-boundary']);
+    expect(await lintRuleIds(file, 'import "./nested/../interfaces.js";')).toEqual([]);
   });
 });
 
@@ -166,6 +185,31 @@ describe('M0 repository guardrails', () => {
     expect(check({ files: { [testFile]: normal } }).ok).toBe(true);
   });
 
+  it.each(['skip', 'only'])('G-05b recognizes Vitest aliases with modifier %s', (modifier) => {
+    const token = ['scenario', modifier].join('.');
+    const imported = 'import { it as scenario } from "vitest";\n';
+    const call = '("example", () => {});';
+    const source = imported + token + call;
+    const waiverPath = 'scripts/guardrail-waivers.json';
+    const waivers = JSON.stringify({ waivers: [
+      { rule: 'G-05b', file: testFile, line: 2, token, reason: 'Sample approval' },
+    ] });
+
+    expect(check({ files: { [testFile]: source } }).violations).toEqual([
+      expect.objectContaining({ rule: 'G-05b', file: testFile, line: 2 }),
+    ]);
+    expect(check({ files: { [testFile]: source, [waiverPath]: waivers } }).ok).toBe(true);
+    expect(check({ files: { [testFile]: '\n' + source, [waiverPath]: waivers } }).ok).toBe(false);
+    expect(check({ files: { [testFile]: imported + 'scenario' + call } }).ok).toBe(true);
+
+    const localObject = 'const test = { ' + modifier + '() {} };\n'
+      + ['test', modifier].join('.') + '();';
+    expect(check({ files: { [testFile]: localObject } }).ok).toBe(true);
+
+    const shadowed = imported + 'function demo(scenario) { ' + token + '(); }';
+    expect(check({ files: { [testFile]: shadowed } }).ok).toBe(true);
+  });
+
   it('G-06 checks for an exact node ID in a test when the graph exists', () => {
     const featureId = ['F01', 'DEMO'].join('_');
     const graph = JSON.stringify({ nodes: [{ id: featureId }] });
@@ -180,4 +224,118 @@ describe('M0 repository guardrails', () => {
     expect(check({ files: { ...files, [testFile]: 'it("' + featureId + '", () => {});' } }).ok).toBe(true);
     expect(check({ files: { [graphPath]: '{"nodes":[{}]}' } }).ok).toBe(false);
   });
+});
+
+const envSchema = 'apps/server/src/config/env.ts';
+const envExample = '.env.example';
+const guardrailEntry = 'scripts/check-guardrails.mjs';
+
+function inGitFixture(test: (cwd: string) => void) {
+  const fixtureParent = resolve('node_modules');
+  const cwd = mkdtempSync(join(fixtureParent, 'm0-guardrails-'));
+  if (dirname(cwd) !== fixtureParent) throw new Error('Unexpected Git fixture directory.');
+
+  try {
+    for (const path of [envSchema, envExample, guardrailEntry, 'scripts/lib/guardrails.mjs', 'package.json']) {
+      const target = join(cwd, path);
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(path, target);
+    }
+    mkdirSync(join(cwd, 'node_modules'));
+    writeFileSync(join(cwd, '.gitignore'), 'node_modules/\n');
+    gitIn(cwd, 'init', '--quiet');
+    gitIn(cwd, 'config', 'core.autocrlf', 'false');
+    gitIn(cwd, 'add', '--', envSchema, envExample);
+    test(cwd);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+function gitIn(cwd: string, ...args: string[]) {
+  execFileSync('git', args, { cwd, windowsHide: true });
+}
+
+function checkIn(cwd: string) {
+  const result = spawnSync(process.execPath, [guardrailEntry, '--json'], {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.stderr).toBe('');
+  return { status: result.status, stdout: result.stdout, body: JSON.parse(result.stdout) };
+}
+
+describe('M0 Git snapshot guardrails', () => {
+  it('G-04a scans project npm configuration and redacts both snapshots', () => inGitFixture((cwd) => {
+    const credential = ['sk', 'Synthetic'.repeat(4)].join('-');
+    const npmrc = join(cwd, '.npmrc');
+    const typescript = join(cwd, 'scripts', 'credential-probe.ts');
+    const safe = 'loglevel=silent\n';
+    const config = '//packages.invalid/:_authToken=' + credential + '\n';
+
+    writeFileSync(typescript, 'export const key = ' + JSON.stringify(credential));
+    const source = checkIn(cwd);
+    expect(source.status).toBe(1);
+    expect(source.body.violations).toEqual([
+      expect.objectContaining({ rule: 'G-04a', file: 'scripts/credential-probe.ts', line: 1 }),
+    ]);
+    expect(source.stdout).not.toContain(credential);
+    unlinkSync(typescript);
+
+    writeFileSync(npmrc, config);
+    gitIn(cwd, 'add', '--', '.npmrc');
+    const tracked = checkIn(cwd);
+    expect(tracked.status).toBe(1);
+    expect(tracked.body.violations).toEqual([
+      expect.objectContaining({ rule: 'G-04a', file: '.npmrc', line: 1 }),
+    ]);
+    expect(tracked.stdout).not.toContain(credential);
+
+    writeFileSync(npmrc, safe);
+    const indexOnly = checkIn(cwd);
+    expect(indexOnly.status).toBe(1);
+    expect(indexOnly.body.violations).toEqual([
+      expect.objectContaining({ rule: 'G-04a', file: '.npmrc', line: 1, snapshot: 'index' }),
+    ]);
+    expect(indexOnly.stdout).not.toContain(credential);
+
+    gitIn(cwd, 'add', '--', '.npmrc');
+    expect(checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, violations: [] } });
+  }), 12000);
+
+  it('G-04c pairs the template and schema within each Git snapshot', () => inGitFixture((cwd) => {
+    const exampleFile = join(cwd, envExample);
+    const schemaFile = join(cwd, envSchema);
+    const initialTemplate = readFileSync(exampleFile, 'utf8');
+    const initialSchema = readFileSync(schemaFile, 'utf8');
+    const changedTemplate = initialTemplate + 'EXTRA=1\n';
+
+    writeFileSync(exampleFile, changedTemplate);
+    gitIn(cwd, 'add', '--', envExample);
+    writeFileSync(exampleFile, initialTemplate);
+    const indexDrift = checkIn(cwd);
+    expect(indexDrift.status).toBe(1);
+    expect(indexDrift.body.violations).toEqual([
+      expect.objectContaining({ rule: 'G-04c', file: envExample, snapshot: 'index' }),
+    ]);
+
+    gitIn(cwd, 'add', '--', envExample);
+    writeFileSync(exampleFile, changedTemplate);
+    const worktreeDrift = checkIn(cwd);
+    expect(worktreeDrift.status).toBe(1);
+    expect(worktreeDrift.body.violations).toEqual([
+      expect.objectContaining({ rule: 'G-04c', file: envExample }),
+    ]);
+    expect(worktreeDrift.body.violations[0]).not.toHaveProperty('snapshot', 'index');
+
+    writeFileSync(schemaFile, initialSchema.replace('  PORT:', '  EXTRA: z.string(),\n  PORT:'));
+    gitIn(cwd, 'add', '--', envExample, envSchema);
+    writeFileSync(exampleFile, initialTemplate);
+    writeFileSync(schemaFile, initialSchema);
+    const matched = checkIn(cwd);
+    expect(matched.status, matched.stdout).toBe(0);
+    expect(matched.body).toMatchObject({ ok: true, violations: [] });
+  }), 12000);
 });

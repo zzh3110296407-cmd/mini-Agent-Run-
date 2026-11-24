@@ -1,4 +1,6 @@
 import { builtinModules } from 'node:module';
+import { dirname, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import js from '@eslint/js';
 import vue from 'eslint-plugin-vue';
 import globals from 'globals';
@@ -6,6 +8,39 @@ import tseslint from 'typescript-eslint';
 
 const BANNED_IMPORTS = [];
 const BANNED_SYNTAX = [];
+const RUNTIME_FILES = ['apps/server/src/runtime/**/*.{js,mjs,cjs,ts,mts,cts}'];
+const serverSource = fileURLToPath(new URL('./apps/server/src/', import.meta.url));
+const runtimeBoundary = {
+  meta: {
+    type: 'problem',
+    schema: [],
+    messages: { injection: 'Inject runtime dependencies through interfaces.' },
+  },
+  create(context) {
+    function check(source) {
+      if (typeof source?.value !== 'string' || !/^\.\.?(?:[/\\]|$)/.test(source.value)) return;
+
+      const target = resolve(dirname(context.physicalFilename), source.value);
+      const directory = relative(serverSource, target).split(sep, 1)[0];
+      const normalized = sep === '\\' ? directory.toLowerCase() : directory;
+      if (normalized === 'db' || normalized === 'config') {
+        context.report({ node: source, messageId: 'injection' });
+      }
+    }
+
+    return {
+      ImportDeclaration: (node) => check(node.source),
+      ExportNamedDeclaration: (node) => check(node.source),
+      ExportAllDeclaration: (node) => check(node.source),
+      ImportExpression: (node) => check(node.source),
+      CallExpression(node) {
+        if (node.callee.type === 'Identifier' && node.callee.name === 'require') {
+          check(node.arguments[0]);
+        }
+      },
+    };
+  },
+};
 
 function importPatterns(packages, paths = []) {
   const packageNames = [...BANNED_IMPORTS, ...packages]
@@ -77,9 +112,14 @@ export default [
     'Keep application dependencies out of the shared workspace.',
   ),
   boundary(
-    ['apps/server/src/runtime/**/*.{js,mjs,cjs,ts,mts,cts}'],
+    RUNTIME_FILES,
     ['fastify', 'better-sqlite3', 'openai', 'dotenv'],
-    ['^(?:\\.\\./)+(?:src/)?(?:db|config)(?:/|$)', '(?:^|/)server/src/(?:db|config)(?:/|$)'],
+    ['^(?:[A-Za-z]:)?/(?:[^/]+/)*server/src/(?:db|config)(?:/|$)'],
     'Inject runtime dependencies through interfaces.',
   ),
+  {
+    files: RUNTIME_FILES,
+    plugins: { workspace: { rules: { 'runtime-boundary': runtimeBoundary } } },
+    rules: { 'workspace/runtime-boundary': 'error' },
+  },
 ];
