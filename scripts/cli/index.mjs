@@ -8,7 +8,7 @@ import { printGuardrails, runGuardrails } from '../check-guardrails.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
-const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke> [--json|--help]';
+const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|trajerrbench-import> [--json|--help]';
 
 function envCheck() {
   const exists = (file) => existsSync(join(root, file));
@@ -23,14 +23,17 @@ function envCheck() {
   return { ok: checks.every((check) => check.ok), checks, warnings };
 }
 
-async function smoke() {
-  // Build the workspace export so this also works immediately after a fresh install.
+function buildShared() {
+  // Make the workspace export available immediately after a fresh install.
   execFileSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', 'packages/shared/tsconfig.json'], {
     cwd: root,
     stdio: 'pipe',
     windowsHide: true,
   });
+}
 
+async function smoke() {
+  buildShared();
   const { buildApp } = await tsImport('../../apps/server/src/app.ts', import.meta.url);
   const { HealthResponseSchema } = await import('@mini-agent-run/shared');
   const app = buildApp();
@@ -48,10 +51,20 @@ async function smoke() {
   }
 }
 
+async function importTrajectories() {
+  buildShared();
+  const { loadWorkspaceEnv } = await tsImport('../../apps/server/src/config/env.ts', import.meta.url);
+  const { importTrajErrBench } = await tsImport('../../apps/server/src/db/trajerrbench.ts', import.meta.url);
+  const source = join(root, '..', 'Database', 'new data', 'TrajErrBench', 'train');
+  const { DB_PATH: databasePath } = loadWorkspaceEnv();
+  return { ok: true, ...importTrajErrBench(source, databasePath) };
+}
+
 const commands = new Map([
   ['env-check', envCheck],
   ['guardrails', runGuardrails],
   ['smoke', smoke],
+  ['trajerrbench-import', importTrajectories],
 ]);
 
 function printResult(command, result, json) {
@@ -64,6 +77,8 @@ function printResult(command, result, json) {
       console.log((ok ? 'PASS ' : 'FAIL ') + name + (value ? ' ' + value : ''));
     }
     for (const warning of result.warnings) console.warn('WARN ' + warning);
+  } else if (command === 'trajerrbench-import') {
+    console.log('Imported TrajErrBench: ' + result.runCount + ' runs, ' + result.stepCount + ' steps.');
   } else {
     console.log('PASS GET /api/health HTTP ' + result.statusCode + ' | SQLite ' + result.health.sqlite);
   }

@@ -1,3 +1,7 @@
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { config } from 'dotenv';
 import { z } from 'zod';
 
 const PortSchema = z
@@ -17,4 +21,15 @@ export const ENV_KEYS = EnvSchema.keyof().options;
 
 export function parseEnv(rawEnv: unknown) {
   return EnvSchema.parse(rawEnv);
+}
+
+export function loadWorkspaceEnv() {
+  const workspace = fileURLToPath(new URL('../../../../', import.meta.url));
+  const envPath = resolve(workspace, '.env');
+  if (existsSync(envPath)) {
+    const { error } = config({ path: envPath, quiet: true });
+    if (error) throw error;
+  }
+  const env = parseEnv(process.env);
+  return { ...env, DB_PATH: resolve(workspace, env.DB_PATH) };
 }
