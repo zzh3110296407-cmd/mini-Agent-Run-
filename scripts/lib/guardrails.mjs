@@ -51,17 +51,27 @@ function readWaivers(source, violations) {
   }
 }
 
+function isVitestImport(clause) {
+  const source = clause.parent.moduleSpecifier;
+  return !clause.isTypeOnly && ts.isStringLiteral(source) && source.text === 'vitest';
+}
+
 function isVitestRunner(runner, checker) {
+  if (ts.isPropertyAccessExpression(runner)) {
+    const namespace = runner.expression;
+    if (!ts.isIdentifier(namespace) || !VITEST_RUNNERS.has(runner.name.text)) return false;
+
+    return checker.getSymbolAtLocation(namespace)?.declarations?.some((declaration) =>
+      ts.isNamespaceImport(declaration) && isVitestImport(declaration.parent));
+  }
+
   const symbol = checker.getSymbolAtLocation(runner);
   if (!symbol) return VITEST_RUNNERS.has(runner.text);
 
-  return symbol.declarations?.some((declaration) => {
-    if (!ts.isImportSpecifier(declaration) || declaration.isTypeOnly) return false;
-    const clause = declaration.parent.parent;
-    const source = clause.parent.moduleSpecifier;
-    return !clause.isTypeOnly && ts.isStringLiteral(source) && source.text === 'vitest'
-      && VITEST_RUNNERS.has((declaration.propertyName ?? declaration.name).text);
-  });
+  return symbol.declarations?.some((declaration) =>
+    ts.isImportSpecifier(declaration) && !declaration.isTypeOnly
+    && isVitestImport(declaration.parent.parent)
+    && VITEST_RUNNERS.has((declaration.propertyName ?? declaration.name).text));
 }
 
 function testModifierCalls(file, source) {
@@ -81,7 +91,9 @@ function testModifierCalls(file, source) {
         while (ts.isPropertyAccessExpression(runner) && ['concurrent', 'sequential'].includes(runner.name.text)) {
           runner = runner.expression;
         }
-        if (ts.isIdentifier(runner)) candidates.push({ runner, modifier });
+        if (ts.isIdentifier(runner) || ts.isPropertyAccessExpression(runner)) {
+          candidates.push({ runner, modifier });
+        }
       }
     }
     ts.forEachChild(node, visit);

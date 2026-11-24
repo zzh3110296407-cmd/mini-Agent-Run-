@@ -210,6 +210,49 @@ describe('M0 repository guardrails', () => {
     expect(check({ files: { [testFile]: shadowed } }).ok).toBe(true);
   });
 
+  it.each([
+    ['it', 'skip'],
+    ['test.concurrent', 'only'],
+    ['describe', 'skip'],
+    ['suite', 'only'],
+  ])('G-05b recognizes Vitest namespace runner %s with modifier %s', (runner, modifier) => {
+    const imported = 'import * as suiteApi from "vitest";\n';
+    const runnerPath = 'suiteApi.' + runner;
+    const token = [runnerPath, modifier].join('.');
+    const call = '("example", () => {});';
+    const source = imported + token + call;
+    const waiverPath = 'scripts/guardrail-waivers.json';
+    const waiver = { rule: 'G-05b', file: testFile, line: 2, token, reason: 'Sample approval' };
+
+    expect(check({ files: { [testFile]: source } }).violations).toEqual([
+      expect.objectContaining({ rule: 'G-05b', file: testFile, line: 2 }),
+    ]);
+    expect(check({ files: { [testFile]: imported + runnerPath + call } }).ok).toBe(true);
+    expect(check({ files: {
+      [testFile]: source,
+      [waiverPath]: JSON.stringify({ waivers: [waiver] }),
+    } }).ok).toBe(true);
+    expect(check({ files: {
+      [testFile]: source,
+      [waiverPath]: JSON.stringify({ waivers: [{ ...waiver, token: [runner, modifier].join('.') }] }),
+    } }).ok).toBe(false);
+  });
+
+  it('G-05b accepts same-named methods outside a Vitest namespace binding', () => {
+    const call = ['suiteApi', 'it', 'skip'].join('.') + '();';
+    const object = 'const suiteApi = { it: { skip() {} } };\n';
+    const imported = 'import * as suiteApi from "vitest";\n';
+
+    const accepted = [
+      object + call,
+      imported + 'function demo() { ' + object + call + ' }',
+      'import * as suiteApi from "./other.js";\n' + call,
+    ];
+    for (const source of accepted) {
+      expect(check({ files: { [testFile]: source } }).ok).toBe(true);
+    }
+  });
+
   it('G-06 checks for an exact node ID in a test when the graph exists', () => {
     const featureId = ['F01', 'DEMO'].join('_');
     const graph = JSON.stringify({ nodes: [{ id: featureId }] });
