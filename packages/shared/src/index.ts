@@ -10,5 +10,3 @@ export const HealthResponseSchema = z.object({
 });
 
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
-
-export * from './trajectories.js';

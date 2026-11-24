@@ -1,9 +1,17 @@
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { config } from 'dotenv';
 import { buildApp } from './app.js';
-import { loadWorkspaceEnv } from './config/env.js';
-import { createTrajectoryTools } from './db/trajerrbench.js';
+import { parseEnv } from './config/env.js';
 
-const { PORT, DB_PATH } = loadWorkspaceEnv();
-const app = buildApp(createTrajectoryTools(DB_PATH));
+const envPath = fileURLToPath(new URL('../../../.env', import.meta.url));
+if (existsSync(envPath)) {
+  const { error } = config({ path: envPath, quiet: true });
+  if (error) throw error;
+}
+
+const { PORT } = parseEnv(process.env);
+const app = buildApp();
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
