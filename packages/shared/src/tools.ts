@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { ToolOutputSummarySchema } from './agent.js';
 import {
-  ArtifactContentTypeSchema, ArtifactIdSchema, IsoDateTimeSchema, LogLevelSchema, NonBlankPathSchema,
-  NonBlankStringSchema, PathTypeSchema, RunIdSchema, SessionIdSchema, TaskOutcomeSchema, ToolCallIdSchema,
+  ArtifactContentTypeSchema, ArtifactIdSchema, IsoDateTimeSchema, LogLevelSchema, NonBlankStringSchema,
+  PathTypeSchema, RunIdSchema, SessionIdSchema, TaskOutcomeSchema, ToolCallIdSchema,
 } from './common.js';
 
 const nonnegative = z.number().int().min(0);
@@ -37,7 +37,7 @@ export const TraceAnomaliesSchema = z.object({
 });
 
 export const TraceOverviewSchema = z.object({
-  file: NonBlankPathSchema,
+  file: NonBlankStringSchema,
   format: TraceFormatSchema,
   byteSize: nonnegative,
   lineCount: nonnegative,
@@ -62,17 +62,17 @@ export const ArtifactMetaSchema = z.object({
 });
 
 export const FsBrowseEntrySchema = z.object({
-  name: NonBlankPathSchema,
-  path: NonBlankPathSchema,
+  name: NonBlankStringSchema,
+  path: NonBlankStringSchema,
   kind: PathTypeSchema,
   byteSize: nonnegative.optional(),
   modifiedAt: IsoDateTimeSchema.optional(),
 });
 
 export const FsBrowseResponseSchema = z.object({
-  currentPath: NonBlankPathSchema,
-  parentPath: NonBlankPathSchema.nullable(),
-  allowedRoots: z.array(NonBlankPathSchema),
+  currentPath: NonBlankStringSchema,
+  parentPath: NonBlankStringSchema.nullable(),
+  allowedRoots: z.array(NonBlankStringSchema),
   entries: z.array(FsBrowseEntrySchema),
 });
 
@@ -90,11 +90,7 @@ export const TextSliceResponseSchema = z.object({
   hasMore: z.boolean(),
   nextOffsetLine: positive.nullable(),
   lines: z.array(LogLineSchema),
-}).refine(
-  ({ hasMore, nextOffsetLine, offsetLine }) =>
-    hasMore ? nextOffsetLine !== null && nextOffsetLine > offsetLine : nextOffsetLine === null,
-  { path: ['nextOffsetLine'], message: 'nextOffsetLine must advance when hasMore is true and be null otherwise.' },
-);
+});
 
 export type TraceFormat = z.infer<typeof TraceFormatSchema>;
 export type TraceThreeState = z.infer<typeof TraceThreeStateSchema>;

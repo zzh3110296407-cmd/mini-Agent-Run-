@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  ArtifactIdSchema, IsoDateTimeSchema, MessageIdSchema, NonBlankPathSchema, NonBlankStringSchema, RunIdSchema,
+  ArtifactIdSchema, IsoDateTimeSchema, MessageIdSchema, NonBlankStringSchema, RunIdSchema,
   RunStatusSchema, SessionIdSchema, StopReasonSchema, TaskOutcomeSchema, ToolCallIdSchema,
 } from './common.js';
 
@@ -75,8 +75,8 @@ const evidence = z.object({ label: NonBlankStringSchema, excerpt: z.string().opt
 const lineEvidence = evidence.extend({ startLine: positive, endLine: positive.optional() });
 
 export const EvidenceRefSchema = z.discriminatedUnion('kind', [
-  evidence.extend({ kind: z.literal('file_step'), file: NonBlankPathSchema, step: nonnegative }),
-  lineEvidence.extend({ kind: z.literal('file_line'), file: NonBlankPathSchema }),
+  evidence.extend({ kind: z.literal('file_step'), file: NonBlankStringSchema, step: nonnegative }),
+  lineEvidence.extend({ kind: z.literal('file_line'), file: NonBlankStringSchema }),
   lineEvidence.extend({ kind: z.literal('artifact_line'), artifactId: ArtifactIdSchema }),
 ]).refine(
   (entry) => entry.kind === 'file_step' || entry.endLine === undefined || entry.endLine >= entry.startLine,

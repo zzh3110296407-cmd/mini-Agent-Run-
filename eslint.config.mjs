@@ -1,5 +1,6 @@
+import { realpathSync } from 'node:fs';
 import { builtinModules } from 'node:module';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import js from '@eslint/js';
 import vue from 'eslint-plugin-vue';
@@ -11,7 +12,9 @@ const BANNED_IMPORTS = [];
 const BANNED_SYNTAX = [];
 const RUNTIME_FILES = ['apps/server/src/runtime/**/*.{js,mjs,cjs,ts,mts,cts}'];
 const root = fileURLToPath(new URL('.', import.meta.url));
+const physicalRoot = realpathSync.native(root);
 const serverSource = resolve(root, 'apps/server/src');
+const physicalServerSource = resolve(physicalRoot, 'apps/server/src');
 const relativeImport = /^\.\.?(?:[/\\]|$)/;
 
 function visitImports(check) {
@@ -46,9 +49,33 @@ function resolveImport(filename, specifier) {
   if (relativeImport.test(specifier) || isAbsolute(specifier)) return resolve(dirname(filename), specifier);
 }
 
-function repoPath(path) {
-  const normalized = relative(root, path).split(sep).join('/');
+function physicalPath(path) {
+  const suffix = [];
+  let entry = path;
+
+  // TypeScript can resolve an unbuilt .js specifier through its source directory.
+  // Resolve that directory's links even when the final file is absent.
+  while (true) {
+    try {
+      return resolve(realpathSync.native(entry), ...suffix.reverse());
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+    }
+    const parent = dirname(entry);
+    if (entry === parent) return path;
+    suffix.push(basename(entry));
+    entry = parent;
+  }
+}
+
+function repoPath(path, base = root) {
+  const normalized = relative(base, path).split(sep).join('/');
   return sep === '\\' ? normalized.toLowerCase() : normalized;
+}
+
+function isServerInfrastructure(path, source) {
+  const directory = repoPath(path, source).split('/', 1)[0];
+  return directory === 'db' || directory === 'config';
 }
 
 const runtimeBoundary = {
@@ -64,9 +91,8 @@ const runtimeBoundary = {
 
       const target = resolveImport(context.physicalFilename, specifier);
       if (!target) return;
-      const directory = relative(serverSource, target).split(sep, 1)[0];
-      const normalized = sep === '\\' ? directory.toLowerCase() : directory;
-      if (normalized === 'db' || normalized === 'config') {
+      if (isServerInfrastructure(target, serverSource)
+        || isServerInfrastructure(physicalPath(target), physicalServerSource)) {
         context.report({ node: source, messageId: 'injection' });
       }
     });
@@ -84,14 +110,18 @@ const packageDag = {
     const from = workspaceDirectory(repoPath(file));
     const allowed = workspaceDependencies[from];
     if (!allowed) return {};
+    const isDenied = (target) => target && target !== from && !allowed.includes(target);
 
     return visitImports((source) => {
       const specifier = literalSpecifier(source);
       if (!specifier) return;
 
       const path = resolveImport(file, specifier);
-      const target = path && workspaceDirectory(repoPath(path));
-      if (!target || target === from || allowed.includes(target)) return;
+      if (!path) return;
+      const logicalWorkspace = workspaceDirectory(repoPath(path));
+      const target = isDenied(logicalWorkspace) ? logicalWorkspace
+        : workspaceDirectory(repoPath(physicalPath(path), physicalRoot));
+      if (!isDenied(target)) return;
 
       context.report({ node: source, messageId: 'boundary', data: { from, target } });
     });

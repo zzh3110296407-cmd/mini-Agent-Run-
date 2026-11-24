@@ -18,7 +18,7 @@ const request = { id: toolCallId, name: 'inspect_trace', arguments: { file: 'tra
 const assistant = { id: messageId, role: 'assistant', content: '', toolCalls: [request], createdAt: timestamp };
 const pending = { toolCallId, toolName: request.name, startedAt: timestamp };
 const problem = { code: 'invalid_input', message: 'Invalid target' };
-const evidence = { kind: 'file_line', label: 'First failure', file: ' trace.json', startLine: 2, endLine: 2 };
+const evidence = { kind: 'file_line', label: 'First failure', file: 'trace.json', startLine: 2, endLine: 2 };
 const conclusion = { summary: 'One step failed', evidence: [evidence], recommendations: ['Check inputs'] };
 const state = {
   runId, sessionId, status: 'pending', systemPrompt: '',
@@ -32,12 +32,16 @@ const run = {
   lastSeq: 0, createdAt: timestamp, startedAt: null, endedAt: null, durationMs: null,
 };
 const session = {
-  id: sessionId, title: 'Example', titleSource: 'auto', targetPath: ' trace.json',
+  id: sessionId, title: 'Example', titleSource: 'auto', targetPath: 'trace.json',
   pathType: 'file', createdAt: timestamp, updatedAt: timestamp,
 };
 const threeState = { terminationReason: null, hasToolError: false, toolErrorCount: 0, taskOutcome: 'unknown' };
 const anomalies = { firstError: null, retryLoops: [], slowSpans: [] };
-const entry = { name: ' trace.json', path: ' trace.json', kind: 'file' };
+const overview = {
+  file: 'trace.json', format: 'generic_json', byteSize: 0, lineCount: 0, stepCount: null,
+  taskSummary: null, threeState, anomalies,
+};
+const entry = { name: 'trace.json', path: 'trace.json', kind: 'file' };
 const line = { lineNumber: 1, level: 'info', text: 'Example' };
 const page = {
   totalLines: 2, matchedLines: 2, offsetLine: 1, limit: 1, hasMore: true, nextOffsetLine: 2, lines: [line],
@@ -72,9 +76,8 @@ describe('M1.1 public shared schemas', () => {
     ['ArtifactContentType', shared.ArtifactContentTypeSchema, 'application/x-ndjson', 'text/html'],
     ['IsoDateTime', shared.IsoDateTimeSchema, timestamp, '2026-11-24'],
     ['NonBlankString', shared.NonBlankStringSchema, 'text', ' \t '],
-    ['NonBlankPath', shared.NonBlankPathSchema, ' trace.json', ' \t '],
     ['Session', shared.SessionSchema, session, { ...session, titleSource: undefined }],
-    ['CreateSessionRequest', shared.CreateSessionRequestSchema, { targetPath: ' trace.json' }, { targetPath: '' }],
+    ['CreateSessionRequest', shared.CreateSessionRequestSchema, { targetPath: 'trace.json' }, { targetPath: ' \t ' }],
     ['UpdateSessionRequest', shared.UpdateSessionRequestSchema, { title: 'Review' }, { title: ' ' }],
     ['SessionListItem', shared.SessionListItemSchema, { ...session, hasActiveRun: false, runCount: 0 },
       { ...session, hasActiveRun: false, runCount: -1 }],
@@ -97,11 +100,7 @@ describe('M1.1 public shared schemas', () => {
     ['TraceThreeState', shared.TraceThreeStateSchema, threeState, { ...threeState, toolErrorCount: -1 }],
     ['TraceAnomalies', shared.TraceAnomaliesSchema, anomalies,
       { ...anomalies, retryLoops: [{ toolName: 'trace', startStep: 0, endStep: 1, repeatCount: 1 }] }],
-    ['TraceOverview', shared.TraceOverviewSchema,
-      { file: ' trace.json', format: 'generic_json', byteSize: 0, lineCount: 0, stepCount: null,
-        taskSummary: null, threeState, anomalies },
-      { file: 'trace.json', format: 'generic_json', byteSize: 0, lineCount: 0, stepCount: -1,
-        taskSummary: null, threeState, anomalies }],
+    ['TraceOverview', shared.TraceOverviewSchema, overview, { ...overview, stepCount: -1 }],
     ['ArtifactMeta', shared.ArtifactMetaSchema,
       { id: artifactId, runId, sessionId, toolCallId, sourceTool: request.name, title: 'Output',
         contentType: 'text/plain', byteSize: 0, lineCount: 0, summary, createdAt: timestamp },
@@ -112,30 +111,48 @@ describe('M1.1 public shared schemas', () => {
       { currentPath: '/traces', parentPath: null, allowedRoots: ['/traces'], entries: [entry] },
       { currentPath: '/traces', parentPath: null, allowedRoots: [' '], entries: [entry] }],
     ['LogLine', shared.LogLineSchema, line, { ...line, lineNumber: 0 }],
-    ['TextSliceResponse', shared.TextSliceResponseSchema, page, { ...page, nextOffsetLine: null }],
+    ['TextSliceResponse', shared.TextSliceResponseSchema, page, { ...page, nextOffsetLine: 0 }],
   ] as const)('validates %s', (_name, schema, valid, invalid) => {
     expect(schema.parse(valid)).toEqual(valid);
     expect(schema.safeParse(invalid).success).toBe(false);
   });
 
-  it('keeps human text trimmed and file paths byte-for-byte intact', () => {
-    expect(shared.CreateSessionRequestSchema.parse({ targetPath: ' trace.json', title: ' Review ' }))
-      .toEqual({ targetPath: ' trace.json', title: 'Review' });
-    expect(shared.FsBrowseEntrySchema.parse(entry).name).toBe(' trace.json');
-    expect(shared.EvidenceRefSchema.parse(evidence)).toEqual(evidence);
+  it('trims shared path and name fields according to the v1.1 contract', () => {
+    const padded = ' \t trace.json \t ';
+    const paddedEntry = { ...entry, name: padded, path: padded };
+    expect(shared.CreateSessionRequestSchema.parse({ targetPath: padded, title: ' Review ' }))
+      .toEqual({ targetPath: 'trace.json', title: 'Review' });
+    expect(shared.SessionSchema.parse({ ...session, targetPath: padded })).toEqual(session);
+    expect(shared.FsBrowseEntrySchema.parse(paddedEntry)).toEqual(entry);
+    expect(shared.FsBrowseResponseSchema.parse({
+      currentPath: ' /traces/current ', parentPath: ' /traces ', allowedRoots: [' /traces '],
+      entries: [paddedEntry],
+    })).toEqual({
+      currentPath: '/traces/current', parentPath: '/traces', allowedRoots: ['/traces'], entries: [entry],
+    });
+    expect(shared.EvidenceRefSchema.parse({ ...evidence, file: padded })).toEqual(evidence);
+    expect(shared.EvidenceRefSchema.parse({ kind: 'file_step', label: 'Failure', step: 0, file: padded }))
+      .toEqual({ kind: 'file_step', label: 'Failure', step: 0, file: 'trace.json' });
+    expect(shared.TraceOverviewSchema.parse({ ...overview, file: padded })).toEqual(overview);
   });
 
-  it('honors retry defaults, sequence bounds and terminal pagination', () => {
+  it('honors retry defaults and sequence bounds', () => {
     expect(shared.RetryRunRequestSchema.parse(undefined)).toEqual({});
     expect(shared.RetryRunRequestSchema.parse({ prompt: 'narrow down step 17' }))
       .toEqual({ prompt: 'narrow down step 17' });
     for (const seq of [0, -1, 1.25]) {
       expect(shared.RunEventEnvelopeSchema.safeParse({ ...event, seq }).success).toBe(false);
     }
-    expect(shared.TextSliceResponseSchema.safeParse({ ...page, nextOffsetLine: 1 }).success).toBe(false);
-    expect(shared.TextSliceResponseSchema.safeParse({ ...page, hasMore: false }).success).toBe(false);
-    expect(shared.TextSliceResponseSchema.parse({ ...page, hasMore: false, nextOffsetLine: null }).hasMore)
-      .toBe(false);
+  });
+
+  it.each([
+    [true, null], [true, 1], [false, null], [false, 2],
+  ] as const)('validates hasMore %s and nullable positive cursor %s independently', (hasMore, nextOffsetLine) => {
+    const input = { ...page, hasMore, nextOffsetLine };
+    expect(shared.TextSliceResponseSchema.parse(input)).toEqual(input);
+    for (const invalid of [-1, 0, 1.5]) {
+      expect(shared.TextSliceResponseSchema.safeParse({ ...input, nextOffsetLine: invalid }).success).toBe(false);
+    }
   });
 
   it('discriminates all message roles and evidence kinds', () => {

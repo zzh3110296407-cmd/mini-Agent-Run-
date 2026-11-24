@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  IsoDateTimeSchema, NonBlankPathSchema, NonBlankStringSchema, PathTypeSchema, SessionIdSchema, TitleSourceSchema,
+  IsoDateTimeSchema, NonBlankStringSchema, PathTypeSchema, SessionIdSchema, TitleSourceSchema,
 } from './common.js';
 import { InvestigationRunSchema } from './run.js';
 
@@ -8,14 +8,14 @@ export const SessionSchema = z.object({
   id: SessionIdSchema,
   title: NonBlankStringSchema,
   titleSource: TitleSourceSchema,
-  targetPath: NonBlankPathSchema,
+  targetPath: NonBlankStringSchema,
   pathType: PathTypeSchema,
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
 });
 
 export const CreateSessionRequestSchema = z.object({
-  targetPath: NonBlankPathSchema,
+  targetPath: NonBlankStringSchema,
   title: NonBlankStringSchema.optional(),
 });
 

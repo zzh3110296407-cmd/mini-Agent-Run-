@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, posix, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ESLint } from 'eslint';
@@ -164,6 +164,38 @@ describe('M1.1 G-03 workspace boundaries', () => {
       expect((await lintRuleIds(file, 'void require(' + specifier + ');')).filter((rule) => ruleIds.has(rule ?? '')))
         .toEqual([]);
     }
+  });
+
+  it('applies the same boundary through npm workspace links and direct paths', async () => {
+    const web = 'apps/web/src/link-probe.ts';
+    const linked = (workspace: string, entry: string) => '../../../node_modules/@mini-agent-run/' + workspace + '/' + entry;
+    const direct = (workspace: string, entry: string) => '../../../packages/' + workspace + '/' + entry;
+    const fromWeb = (specifier: string) => resolve(dirname(web), specifier);
+    const bareImport = (specifier: string) => 'import ' + JSON.stringify(specifier) + ';';
+
+    for (const [workspace, expected] of [['tools', ['workspace/package-dag']], ['shared', []]] as const) {
+      const link = linked(workspace, 'dist/index.js');
+      const regular = direct(workspace, 'dist/index.js');
+      expect(realpathSync(fromWeb(link))).toBe(realpathSync(fromWeb(regular)));
+      expect(await lintRuleIds(web, bareImport(regular))).toEqual(expected);
+      expect(await lintRuleIds(web, bareImport(link))).toEqual(expected);
+    }
+
+    const unbuilt = linked('tools', 'src/index.js');
+    expect(await lintRuleIds(web, bareImport(direct('tools', 'src/index.js')))).toEqual(['workspace/package-dag']);
+    expect(await lintRuleIds(web, bareImport(unbuilt))).toEqual(['workspace/package-dag']);
+
+    const target = linked('tools', 'dist/index.js');
+    for (const specifier of [target, fromWeb(target), pathToFileURL(fromWeb(target)).href]) {
+      const quoted = JSON.stringify(specifier);
+      expect(await lintRuleIds(web, 'export * from ' + quoted + ';')).toContain('workspace/package-dag');
+      expect(await lintRuleIds(web, 'void import(' + quoted + ');')).toContain('workspace/package-dag');
+      expect(await lintRuleIds(web, 'void require(' + quoted + ');')).toContain('workspace/package-dag');
+    }
+
+    const relocatedRuntimeImport = '../../../../node_modules/@mini-agent-run/server/src/db/smoke.js';
+    expect(await lintRuleIds('apps/server/src/runtime/link-probe.ts', bareImport(relocatedRuntimeImport)))
+      .toEqual(['workspace/runtime-boundary']);
   });
 
   it('preserves runtime DI diagnostics and rejects literal dynamic templates', async () => {

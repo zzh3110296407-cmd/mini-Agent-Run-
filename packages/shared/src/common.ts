@@ -21,9 +21,6 @@ export const MessageIdSchema = z.string().regex(/^msg_[A-Za-z0-9_-]+$/);
 export const ToolCallIdSchema = z.string().regex(/^tc_[A-Za-z0-9_-]+$/);
 export const NonBlankStringSchema = z.string().trim().min(1);
 
-// File names and paths can have meaningful whitespace.
-export const NonBlankPathSchema = z.string().refine((value) => value.trim().length > 0, 'Expected a nonblank path.');
-
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 export type StopReason = z.infer<typeof StopReasonSchema>;
 export type PathType = z.infer<typeof PathTypeSchema>;
