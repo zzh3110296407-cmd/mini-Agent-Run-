@@ -1,11 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { ESLint } from 'eslint';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { ENV_KEYS } from '../../apps/server/src/config/env.js';
 import { inspectFeatureGraph, scanGuardrails } from '../lib/guardrails.mjs';
+import { workspaceDependencies, workspaceDirectory, workspaceName } from '../lib/workspace-dag.mjs';
 import { envExample, envSchema, gitIn, guardrailEntry, inGitFixture } from './git-fixture.js';
 
 const lint = new ESLint();
@@ -89,6 +91,170 @@ describe('M0 ESLint guardrails', () => {
 });
 
 const template = ENV_KEYS.map((key) => key + '=placeholder').join('\n');
+
+describe('M1.1 G-03 workspace boundaries', () => {
+  const ruleIds = new Set(['no-restricted-imports', 'no-restricted-syntax', 'workspace/package-dag',
+    'workspace/runtime-boundary']);
+
+  it.each([
+    {
+      name: 'shared', file: 'packages/shared/src/probe.ts',
+      denied: ['@mini-agent-run/ai', 'node:fs', 'path', 'fastify', 'better-sqlite3', 'vue', 'openai', 'dotenv'],
+      path: '../../ai/src/index.js', allowed: ['zod', './common.js'],
+    },
+    {
+      name: 'ai', file: 'packages/ai/src/probe.ts',
+      denied: ['@mini-agent-run/agent', '@mini-agent-run/tools', 'fastify', 'better-sqlite3', 'vue', 'dotenv'],
+      path: '../../agent/src/index.js', allowed: ['@mini-agent-run/shared', '.././../shared/src/index.js'],
+    },
+    {
+      name: 'agent', file: 'packages/agent/src/probe.ts',
+      denied: ['@mini-agent-run/tools', '@mini-agent-run/debug-agent', 'fastify', 'better-sqlite3', 'openai', 'dotenv'],
+      path: '../../tools/src/index.js', allowed: ['@mini-agent-run/shared', '@mini-agent-run/ai'],
+    },
+    {
+      name: 'tools', file: 'packages/tools/src/probe.ts',
+      denied: ['@mini-agent-run/ai', '@mini-agent-run/debug-agent', 'fastify', 'better-sqlite3', 'vue', 'openai', 'dotenv'],
+      path: '../../ai/src/index.js', allowed: ['@mini-agent-run/shared', '@mini-agent-run/agent', 'node:fs/promises'],
+    },
+    {
+      name: 'debug-agent', file: 'packages/debug-agent/src/probe.ts',
+      denied: ['@mini-agent-run/server', 'fastify', 'better-sqlite3', 'vue', 'openai', 'dotenv'],
+      path: '../../../apps/server/src/app.js',
+      allowed: ['@mini-agent-run/shared', '@mini-agent-run/ai', '@mini-agent-run/agent', '@mini-agent-run/tools'],
+    },
+    {
+      name: 'server', file: 'apps/server/src/probe.ts',
+      denied: ['vue', '@mini-agent-run/web'],
+      path: '../../web/src/main.js',
+      allowed: ['fastify', 'better-sqlite3', '@mini-agent-run/shared', '@mini-agent-run/debug-agent'],
+    },
+    {
+      name: 'runtime', file: 'apps/server/src/runtime/probe.ts',
+      denied: ['better-sqlite3', 'fastify', 'openai', 'dotenv', 'vue', '@mini-agent-run/web'],
+      path: './../../../web/src/main.js',
+      allowed: ['@mini-agent-run/shared', '@mini-agent-run/agent', '@mini-agent-run/debug-agent', './nested/../interfaces.js'],
+    },
+    {
+      name: 'web', file: 'apps/web/src/probe.ts',
+      denied: ['@mini-agent-run/ai', '@mini-agent-run/agent', '@mini-agent-run/tools',
+        '@mini-agent-run/debug-agent', '@mini-agent-run/server', 'node:fs'],
+      path: '../../../packages/tools/src/index.js', allowed: ['vue', '@mini-agent-run/shared'],
+    },
+  ])('enforces static and dynamic boundaries for $name', async ({ file, denied, path, allowed }) => {
+    for (const name of denied) {
+      const specifier = JSON.stringify(name);
+      expect(await lintRuleIds(file, 'import ' + specifier + ';')).toContain('no-restricted-imports');
+      expect(await lintRuleIds(file, 'void import(' + specifier + ');')).toContain('no-restricted-syntax');
+      expect(await lintRuleIds(file, 'void require(' + specifier + ');')).toContain('no-restricted-syntax');
+    }
+
+    const absolute = resolve(dirname(file), path);
+    for (const specifier of [path, absolute, pathToFileURL(absolute).href].map((value) => JSON.stringify(value))) {
+      for (const syntax of ['import %s;', 'export * from %s;', 'export { sample } from %s;',
+        'void import(%s);', 'void require(%s);']) {
+        expect(await lintRuleIds(file, syntax.replace('%s', specifier))).toContain('workspace/package-dag');
+      }
+    }
+
+    for (const name of allowed) {
+      const specifier = JSON.stringify(name);
+      expect((await lintRuleIds(file, 'import ' + specifier + ';')).filter((rule) => ruleIds.has(rule ?? '')))
+        .toEqual([]);
+      expect((await lintRuleIds(file, 'void require(' + specifier + ');')).filter((rule) => ruleIds.has(rule ?? '')))
+        .toEqual([]);
+    }
+  });
+
+  it('preserves runtime DI diagnostics and rejects literal dynamic templates', async () => {
+    const runtime = 'apps/server/src/runtime/probe.ts';
+    expect(await lintRuleIds(runtime, 'import "./../config/env.js";')).toEqual(['workspace/runtime-boundary']);
+    expect(await lintRuleIds(runtime, 'void import(`./../db/smoke.js`);')).toEqual(['workspace/runtime-boundary']);
+    expect(await lintRuleIds('packages/shared/src/probe.ts', 'void import(`node:path`);'))
+      .toContain('no-restricted-syntax');
+    expect(await lintRuleIds('packages/ai/src/probe.ts', 'void import(`../../tools/src/index.js`);'))
+      .toContain('workspace/package-dag');
+  });
+
+  it('blocks Node globals in shared source and allows them in server-side packages', async () => {
+    expect(await lintRuleIds('packages/shared/src/probe.ts', 'void process.env; void Buffer.alloc(0);'))
+      .toEqual(['no-restricted-globals', 'no-restricted-globals']);
+    expect(await lintRuleIds('packages/tools/src/probe.ts', 'void process.env; void Buffer.alloc(0);'))
+      .toEqual([]);
+  });
+});
+
+type DependencySection = 'dependencies' | 'devDependencies' | 'peerDependencies' | 'optionalDependencies';
+type Manifest = { name: string } & Partial<Record<DependencySection, Record<string, string>>>;
+type Project = { references?: { path: string }[] };
+const dependencySections: DependencySection[] = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
+
+function projectPath(base: string, target: string) {
+  return posix.relative('/repo', posix.resolve('/repo', base, target.replaceAll('\\', '/')));
+}
+
+function dependencyWorkspace(base: string, name: string, version: string) {
+  const alias = /^npm:(@mini-agent-run\/[^@]+)/.exec(version)?.[1];
+  const local = /^(?:file|link):(.+)/.exec(version)?.[1];
+  if (local) {
+    const target = workspaceDirectory(projectPath(base, local));
+    if (target) return workspaceName(target);
+  }
+  const packageName = alias ?? name;
+  return packageName.startsWith('@mini-agent-run/') ? packageName : undefined;
+}
+
+function forbiddenManifestDependencies(base: string, manifest: Manifest, allowed: string[]) {
+  return dependencySections.flatMap((section) =>
+    Object.entries(manifest[section] ?? {}).flatMap(([name, version]) => {
+      const target = dependencyWorkspace(base, name, version);
+      return target && !allowed.includes(target) ? [section + ':' + target] : [];
+    }));
+}
+
+function references(base: string, config: Project) {
+  return (config.references ?? [])
+    .map(({ path }) => projectPath(base, path).replace(/\/tsconfig\.json$/, ''))
+    .sort();
+}
+
+describe('M1.1 workspace manifest and project-reference DAG', () => {
+  it('checks all workspace manifests and the exact package references', () => {
+    const packagePaths = Object.keys(workspaceDependencies).filter((name) => name.startsWith('packages/'));
+    const solution = JSON.parse(readFileSync('tsconfig.packages.json', 'utf8')) as Project;
+    expect(references('', solution)).toEqual(packagePaths.sort());
+
+    for (const [base, targets] of Object.entries(workspaceDependencies)) {
+      const manifest = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8')) as Manifest;
+      const allowed = targets.map(workspaceName);
+      expect(manifest.name).toBe(workspaceName(base));
+      expect(forbiddenManifestDependencies(base, manifest, allowed), base).toEqual([]);
+      if (base.startsWith('packages/')) {
+        const project = JSON.parse(readFileSync(join(base, 'tsconfig.json'), 'utf8')) as Project;
+        expect(references(base, project), base).toEqual([...targets].sort());
+        const production = Object.entries(manifest.dependencies ?? {});
+        const expected = base === 'packages/shared' ? ['zod'] : allowed;
+        expect(production.map(([name]) => name).sort(), base).toEqual([...expected].sort());
+      }
+    }
+  });
+
+  it.each(dependencySections)('rejects reverse entries in %s', (section) => {
+    const manifest = { name: '@mini-agent-run/ai', [section]: { '@mini-agent-run/tools': '0.0.0' } };
+    expect(forbiddenManifestDependencies('packages/ai', manifest, ['@mini-agent-run/shared']))
+      .toEqual([section + ':@mini-agent-run/tools']);
+  });
+
+  it('rejects reverse aliases and links and resolves relative project references', () => {
+    const manifest = {
+      name: '@mini-agent-run/shared',
+      dependencies: { alias: 'npm:@mini-agent-run/tools@0.0.0', linked: 'file:../agent' },
+    };
+    expect(forbiddenManifestDependencies('packages/shared', manifest, []))
+      .toEqual(['dependencies:@mini-agent-run/tools', 'dependencies:@mini-agent-run/agent']);
+    expect(references('packages/ai', { references: [{ path: '../tools' }] })).not.toEqual(['packages/shared']);
+  });
+});
 const file = 'apps/server/src/probe.ts';
 const testFile = 'apps/server/tests/probe.test.ts';
 const graphPath = 'docs/feature-graph.json';

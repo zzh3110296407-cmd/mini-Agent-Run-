@@ -24,8 +24,8 @@ function envCheck() {
 }
 
 async function smoke() {
-  // Build the workspace export so this also works immediately after a fresh install.
-  execFileSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', 'packages/shared/tsconfig.json'], {
+  // Build the workspace exports so this also works immediately after a fresh install.
+  execFileSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-b', 'tsconfig.packages.json'], {
     cwd: root,
     stdio: 'pipe',
     windowsHide: true,

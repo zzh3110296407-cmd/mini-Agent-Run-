@@ -8,14 +8,14 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "build:shared": "npm run build --workspace=@mini-agent-run/shared",
-    "typecheck": "npm run build:shared && npm run typecheck --workspaces --if-present",
+    "build:packages": "tsc -b tsconfig.packages.json",
+    "typecheck": "npm run build:packages && npm run typecheck --workspace=@mini-agent-run/server && npm run typecheck --workspace=@mini-agent-run/web",
     "lint": "eslint . --max-warnings 0",
     "guardrails": "node scripts/check-guardrails.mjs",
-    "test": "npm run build:shared && vitest run",
-    "build": "npm run build:shared && npm run build --workspace=@mini-agent-run/server && npm run build --workspace=@mini-agent-run/web",
+    "test": "npm run build:packages && vitest run",
+    "build": "npm run build:packages && npm run build --workspace=@mini-agent-run/server && npm run build --workspace=@mini-agent-run/web",
     "verify": "node scripts/verify.mjs",
-    "dev": "npm run build:shared && concurrently --kill-others -n server,web -c cyan,green \"npm run dev --workspace=@mini-agent-run/server\" \"npm run dev --workspace=@mini-agent-run/web\"",
+    "dev": "npm run build:packages && concurrently --kill-others -n server,web -c cyan,green \"npm run dev --workspace=@mini-agent-run/server\" \"npm run dev --workspace=@mini-agent-run/web\"",
     "cli": "node scripts/cli/index.mjs"
   },
   "devDependencies": {
