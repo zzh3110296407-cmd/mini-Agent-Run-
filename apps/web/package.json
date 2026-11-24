@@ -1,0 +1,20 @@
+{
+  "name": "@mini-agent-run/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@mini-agent-run/shared": "0.0.0",
+    "vue": "^3.5.22"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.4",
+    "vite": "^6.4.0",
+    "vue-tsc": "^3.1.0"
+  }
+}
