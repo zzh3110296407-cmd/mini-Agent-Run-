@@ -1,10 +1,12 @@
-import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { ESLint } from 'eslint';
+import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { ENV_KEYS } from '../../apps/server/src/config/env.js';
-import { scanGuardrails } from '../lib/guardrails.mjs';
+import { inspectFeatureGraph, scanGuardrails } from '../lib/guardrails.mjs';
+import { envExample, envSchema, gitIn, guardrailEntry, inGitFixture } from './git-fixture.js';
 
 const lint = new ESLint();
 
@@ -269,36 +271,6 @@ describe('M0 repository guardrails', () => {
   });
 });
 
-const envSchema = 'apps/server/src/config/env.ts';
-const envExample = '.env.example';
-const guardrailEntry = 'scripts/check-guardrails.mjs';
-
-function inGitFixture(test: (cwd: string) => void) {
-  const fixtureParent = resolve('node_modules');
-  const cwd = mkdtempSync(join(fixtureParent, 'm0-guardrails-'));
-  if (dirname(cwd) !== fixtureParent) throw new Error('Unexpected Git fixture directory.');
-
-  try {
-    for (const path of [envSchema, envExample, guardrailEntry, 'scripts/lib/guardrails.mjs', 'package.json']) {
-      const target = join(cwd, path);
-      mkdirSync(dirname(target), { recursive: true });
-      copyFileSync(path, target);
-    }
-    mkdirSync(join(cwd, 'node_modules'));
-    writeFileSync(join(cwd, '.gitignore'), 'node_modules/\n');
-    gitIn(cwd, 'init', '--quiet');
-    gitIn(cwd, 'config', 'core.autocrlf', 'false');
-    gitIn(cwd, 'add', '--', envSchema, envExample);
-    test(cwd);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-}
-
-function gitIn(cwd: string, ...args: string[]) {
-  execFileSync('git', args, { cwd, windowsHide: true });
-}
-
 function checkIn(cwd: string) {
   const result = spawnSync(process.execPath, [guardrailEntry, '--json'], {
     cwd,
@@ -380,5 +352,236 @@ describe('M0 Git snapshot guardrails', () => {
     const matched = checkIn(cwd);
     expect(matched.status, matched.stdout).toBe(0);
     expect(matched.body).toMatchObject({ ok: true, violations: [] });
+  }), 12000);
+});
+
+const demoId = (number: number) => 'F' + String(number).padStart(2, '0') + '_DEMO';
+const first = demoId(1);
+const second = demoId(2);
+const third = demoId(3);
+const fourth = demoId(4);
+
+function demoNode(id: string, milestone = 'M1') {
+  return { id, name: id, milestone, packages: ['apps/server'], summary: 'Fixture feature' };
+}
+
+function stagedGraph(activeMilestone = 'M0') {
+  return {
+    version: '1.0',
+    milestones: ['M0', 'M1', 'M2'],
+    activeMilestone,
+    nodes: [demoNode(first), demoNode(second, 'M2')],
+    edges: [{ from: first, to: second, relation: 'depends_on' }],
+  };
+}
+
+function testTitle(id: string) {
+  return 'it("[ ' + id + ' ] covers a feature", () => {});';
+}
+
+function inspect(graph: unknown, files: [string, string][] = []) {
+  return inspectFeatureGraph(JSON.stringify(graph), new Map(files));
+}
+
+describe('G-06 staged Feature Graph', () => {
+  const base = stagedGraph();
+
+  it.each([
+    [{ nodes: [] }, 'nodes'],
+    [{ nodes: [null] }, 'nodes'],
+    [{ nodes: [{ id: first }], edges: [] }, 'milestones'],
+    [{ ...base, version: ' ' }, 'version'],
+    [{ ...base, milestones: undefined }, 'milestones'],
+    [{ ...base, milestones: [] }, 'milestones'],
+    [{ ...base, milestones: ['M0', 'M1', 'M1'] }, 'milestones'],
+    [{ ...base, milestones: ['M0', 'M1', 'M 2'] }, 'milestones'],
+    [{ ...base, activeMilestone: undefined }, 'activeMilestone'],
+    [{ ...base, activeMilestone: null }, 'activeMilestone'],
+    [{ ...base, activeMilestone: '' }, 'activeMilestone'],
+    [{ ...base, activeMilestone: 'M99' }, 'activeMilestone'],
+    [{ ...base, edges: undefined }, 'edges'],
+    [{ ...base, nodes: [demoNode('1-invalid')] }, 'id'],
+    [{ ...base, nodes: [demoNode(first), demoNode(first)] }, 'id'],
+    [{ ...base, nodes: [demoNode(first, 'M99'), demoNode(second)] }, 'milestone'],
+    [{ ...base, nodes: [{ ...demoNode(first), name: ' ' }, demoNode(second)] }, 'name'],
+    [{ ...base, nodes: [{ ...demoNode(first), packages: [] }, demoNode(second)] }, 'packages'],
+    [{ ...base, nodes: [{ ...demoNode(first), packages: ['apps/web', 'apps/web'] }, demoNode(second)] }, 'packages'],
+    [{ ...base, nodes: [{ ...demoNode(first), packages: [' '] }, demoNode(second)] }, 'packages'],
+    [{ ...base, edges: [{ from: first, to: demoId(99) }] }, 'to'],
+    [{ ...base, edges: [{ from: demoId(99), to: first }] }, 'from'],
+    [{ ...base, edges: [{ from: first, to: first }] }, 'Self-loop'],
+    [{ ...base, edges: [...base.edges, ...base.edges] }, 'Duplicate edge'],
+    [{ ...base, edges: [{ from: first, to: second, relation: '' }] }, 'relation'],
+  ])('rejects an invalid graph field (%#)', (graph, field) => {
+    expect(inspect(graph)).toMatchObject({
+      ok: false, present: true, skipped: false,
+      violations: expect.arrayContaining([
+        expect.objectContaining({ rule: 'G-06', message: expect.stringContaining(field) }),
+      ]),
+    });
+  });
+
+  it.each(['name', 'milestone', 'packages', 'summary'] as const)(
+    'requires the %s field even for deferred nodes',
+    (field) => {
+      const nodes = [{ ...demoNode(first), [field]: undefined }, demoNode(second)];
+      expect(inspect({ ...base, nodes })).toMatchObject({
+        ok: false, violations: expect.arrayContaining([
+          expect.objectContaining({ rule: 'G-06', message: expect.stringContaining(field) }),
+        ]),
+      });
+    },
+  );
+
+  it('requires previous and active milestones while reporting deferred nodes', () => {
+    const coveredFirst: [string, string][] = [[testFile, testTitle(first)]];
+
+    expect(inspect(stagedGraph(), [])).toMatchObject({
+      ok: true, summary: { total: 2, required: 0, covered: 0, missing: 0, deferred: 2 },
+    });
+    expect(inspect(stagedGraph('M1'), coveredFirst)).toMatchObject({
+      ok: true, activeMilestone: 'M1',
+      summary: { total: 2, required: 1, covered: 1, missing: 0, deferred: 1 },
+      nodes: [
+        { id: first, required: true, covered: true, testFiles: [testFile] },
+        { id: second, required: false, covered: false, testFiles: [] },
+      ],
+    });
+    expect(inspect(stagedGraph('M1'))).toMatchObject({
+      ok: false, violations: [expect.objectContaining({ message: expect.stringContaining(first) })],
+    });
+    expect(inspect(stagedGraph('M2'), coveredFirst)).toMatchObject({
+      ok: false, violations: [expect.objectContaining({ message: expect.stringContaining(second) })],
+    });
+    expect(inspect(stagedGraph('M2'), [[testFile, testTitle(second)]])).toMatchObject({
+      ok: false, violations: [expect.objectContaining({ message: expect.stringContaining(first) })],
+    });
+    expect(inspect(stagedGraph('M2'), [[testFile, testTitle(first) + testTitle(second)]])).toMatchObject({
+      ok: true, summary: { total: 2, required: 2, covered: 2, missing: 0, deferred: 0 },
+    });
+  });
+
+  it.each([[first, second], [first, second, third]])(
+    'reports a cycle with deferred nodes (%#)',
+    (...cycle) => {
+      const edges = cycle.map((from, index) => ({ from, to: cycle[(index + 1) % cycle.length] }));
+      const nodes = cycle.map((id) => demoNode(id));
+      expect(inspect({ ...base, nodes, edges })).toMatchObject({
+        ok: false,
+        violations: [expect.objectContaining({
+          rule: 'G-06', message: expect.stringContaining('Cycle detected: ' + [...cycle, cycle[0]].join(' -> ')),
+        })],
+      });
+    },
+  );
+
+  it('accepts a diamond spanning the active and deferred stages', () => {
+    const nodes = [demoNode(first), demoNode(second), demoNode(third, 'M2'), demoNode(fourth, 'M2')];
+    const edges = [[first, second], [first, third], [second, fourth], [third, fourth]]
+      .map(([from, to]) => ({ from, to }));
+    const files: [string, string][] = [[testFile, testTitle(first) + testTitle(second)]];
+    const graph = { ...base, nodes, edges, activeMilestone: 'M1' };
+
+    expect(inspect(graph, files)).toMatchObject({ ok: true, summary: { deferred: 2 } });
+    expect(inspect({ ...graph, activeMilestone: 'M2' }, files)).toMatchObject({
+      ok: false, summary: { missing: 2 },
+    });
+  });
+
+  it('accepts generated DAGs and detects a back edge on each generated graph', () => {
+    const dag = fc.integer({ min: 2, max: 8 }).chain((size) => {
+      const ids = Array.from({ length: size }, (_, i) => demoId(i + 1));
+      const forward = ids.flatMap((from, i) => ids.slice(i + 1).map((to) => ({ from, to })));
+      return fc.tuple(fc.constant(ids), fc.subarray(forward, { minLength: 1 }), fc.nat());
+    });
+
+    fc.assert(fc.property(dag, ([ids, edges, choice]) => {
+      const graph = { ...base, nodes: ids.map((id) => demoNode(id)), edges };
+      expect(inspect(graph)).toMatchObject({ ok: true, violations: [] });
+      const forward = edges[choice % edges.length];
+      const cyclic = { ...graph, edges: [...edges, { from: forward.to, to: forward.from }] };
+      expect(inspect(cyclic)).toMatchObject({
+        ok: false, violations: [expect.objectContaining({ rule: 'G-06', message: expect.stringContaining('Cycle') })],
+      });
+    }), { seed: 20261124, numRuns: 100 });
+  });
+
+  it.each([
+    ['single-line comment', '// "' + first + '"'],
+    ['block comment', '/* "' + first + '" */'],
+    ['template expression comment', 'it(`case ${0 /* "' + first + '" */}`, () => {});'],
+    ['regular expression', 'const decoy = /"' + first + '"/;'],
+    ['partial prefix', testTitle(first + '_OTHER')],
+    ['partial suffix', testTitle('OTHER-' + first)],
+    ['identifier', 'const ' + first + ' = 1;'],
+  ])('ignores references in a %s', (_label, source) => {
+    const result = check({ files: {
+      [graphPath]: JSON.stringify(stagedGraph('M1')), [testFile]: source, [file]: testTitle(first),
+    } });
+    expect(result.violations).toEqual([
+      expect.objectContaining({ rule: 'G-06', message: expect.stringContaining(first) }),
+    ]);
+  });
+
+  it('accepts literals including template heads, middles and tails in sorted test files', () => {
+    const head = 'it(`' + first + ' ${0} tail`, () => {});';
+    const middle = 'it(`head ${ { x: 0 } } ' + first + ' ${1} tail`, () => {});';
+    const tail = 'it(`head ${`nested ${0}`} ' + first + '`, () => {});';
+    const literal = 'describe(`' + first + ' suite`, () => {});';
+    const files: [string, string][] = [
+      ['scripts/tests/tail.test.ts', tail], ['scripts/tests/middle.test.ts', middle],
+      ['scripts/tests/literal.test.ts', literal], ['scripts/tests/head.test.ts', head],
+      [testFile, 'it.each(["' + first + '"])("case", () => {});'],
+    ];
+    expect(inspect(stagedGraph('M1'), files)).toMatchObject({
+      ok: true, nodes: [{ id: first, covered: true, testFiles: files.map(([path]) => path).sort() },
+        { id: second, required: false, testFiles: [] }],
+    });
+  });
+});
+
+describe('G-06 Git snapshots', () => {
+  it('matches only files and graph contents in each snapshot', () => inGitFixture((cwd) => {
+    const graph = stagedGraph('M1');
+    const graphFile = join(cwd, graphPath);
+    const test = join(cwd, testFile);
+    mkdirSync(dirname(graphFile), { recursive: true });
+    mkdirSync(dirname(test), { recursive: true });
+
+    writeFileSync(graphFile, JSON.stringify(graph));
+    writeFileSync(test, testTitle(first));
+    gitIn(cwd, 'add', '--', graphPath);
+    const unstagedTest = checkIn(cwd);
+    expect(unstagedTest.status).toBe(1);
+    expect(unstagedTest.body.violations).toEqual([
+      expect.objectContaining({ rule: 'G-06', snapshot: 'index', message: expect.stringContaining(first) }),
+    ]);
+
+    gitIn(cwd, 'add', '--', testFile);
+    expect(checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, skipped: [] } });
+
+    const cycle = [...graph.edges, { from: second, to: first, relation: 'depends_on' }];
+    writeFileSync(graphFile, JSON.stringify({ ...graph, edges: cycle }));
+    gitIn(cwd, 'add', '--', graphPath);
+    writeFileSync(graphFile, JSON.stringify(graph));
+    const indexCycle = checkIn(cwd);
+    expect(indexCycle.status).toBe(1);
+    expect(indexCycle.body.violations).toEqual([
+      expect.objectContaining({ rule: 'G-06', snapshot: 'index', message: expect.stringContaining('Cycle') }),
+    ]);
+
+    gitIn(cwd, 'add', '--', graphPath);
+    writeFileSync(test, '// ' + first);
+    const worktreeMissing = checkIn(cwd);
+    expect(worktreeMissing.status).toBe(1);
+    expect(worktreeMissing.body.violations).toEqual([
+      { rule: 'G-06', file: graphPath, line: 1, message: 'No test references feature ID ' + first + '.' },
+    ]);
+    unlinkSync(test);
+    expect(checkIn(cwd).body.violations).toEqual(worktreeMissing.body.violations);
+
+    writeFileSync(test, testTitle(first));
+    unlinkSync(graphFile);
+    expect(checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, skipped: [] } });
   }), 12000);
 });

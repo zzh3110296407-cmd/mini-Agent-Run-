@@ -4,11 +4,11 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tsImport } from 'tsx/esm/api';
-import { printGuardrails, runGuardrails } from '../check-guardrails.mjs';
+import { printGuardrails, runGraph, runGuardrails } from '../check-guardrails.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
-const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke> [--json|--help]';
+const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph> [--json|--help]';
 
 function envCheck() {
   const exists = (file) => existsSync(join(root, file));
@@ -52,13 +52,35 @@ const commands = new Map([
   ['env-check', envCheck],
   ['guardrails', runGuardrails],
   ['smoke', smoke],
+  ['graph', runGraph],
 ]);
+
+function printGraph(result) {
+  if (!result.present) {
+    console.log('SKIP Feature Graph is absent.');
+    return;
+  }
+
+  if (result.activeMilestone) console.log('Active milestone: ' + result.activeMilestone);
+  for (const { id, required, covered, testFiles } of result.nodes) {
+    let status = 'DEFERRED';
+    if (required) status = covered ? 'COVERED' : 'MISSING';
+    const locations = testFiles.length ? ' — ' + testFiles.join(', ') : '';
+    console.log('[' + status + '] ' + id + locations);
+  }
+  const { total, required, covered, missing, deferred } = result.summary;
+  console.log('Feature Graph: ' + total + ' total, ' + required + ' required, ' + covered
+    + ' covered, ' + missing + ' missing, ' + deferred + ' deferred.');
+  if (!result.ok) printGuardrails({ ...result, skipped: [] }, false);
+}
 
 function printResult(command, result, json) {
   if (command === 'guardrails') {
     printGuardrails(result, json);
   } else if (json) {
     console.log(JSON.stringify(result));
+  } else if (command === 'graph') {
+    printGraph(result);
   } else if (command === 'env-check') {
     for (const { name, ok, value } of result.checks) {
       console.log((ok ? 'PASS ' : 'FAIL ') + name + (value ? ' ' + value : ''));

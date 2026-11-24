@@ -3,10 +3,13 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tsImport } from 'tsx/esm/api';
-import { ENV_EXAMPLE, ENV_SCHEMA, isScannablePath, normalizePath, scanGuardrails } from './lib/guardrails.mjs';
+import {
+  ENV_EXAMPLE, ENV_SCHEMA, GRAPH_FILE, inspectRepositoryGraph,
+  isFeatureTestFile, isScannablePath, normalizePath, scanGuardrails,
+} from './lib/guardrails.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const explicitPaths = [ENV_EXAMPLE, '.npmrc', 'docs/feature-graph.json', 'scripts/guardrail-waivers.json',
+const explicitPaths = [ENV_EXAMPLE, '.npmrc', GRAPH_FILE, 'scripts/guardrail-waivers.json',
   'pnpm-lock.yaml', 'yarn.lock', '.husky'];
 
 function git(...args) {
@@ -67,7 +70,18 @@ async function readIndexEnv(trackedPaths, files, envKeys) {
   return { template, keys };
 }
 
-export async function runGuardrails() {
+function readIndexGraph(trackedPaths, indexFiles) {
+  if (!trackedPaths.has(GRAPH_FILE)) return;
+
+  const files = new Map();
+  for (const path of trackedPaths) {
+    // Read the actual indexed content, even if Git is configured to omit worktree changes for the path.
+    if (isFeatureTestFile(path)) files.set(path, indexFiles.get(path) ?? git('show', ':' + path));
+  }
+  return { source: indexFiles.get(GRAPH_FILE) ?? git('show', ':' + GRAPH_FILE), files };
+}
+
+function collectRepositoryFiles() {
   const trackedPaths = gitPaths('ls-files', '--cached');
   const untrackedPaths = gitPaths('ls-files', '--others', '--exclude-standard');
   const presentPaths = explicitPaths.filter((file) => existsSync(join(root, file)));
@@ -76,8 +90,12 @@ export async function runGuardrails() {
   for (const file of new Set([...trackedPaths, ...untrackedPaths, ...presentPaths])) {
     if (!canRead(file)) continue;
     const absolutePath = join(root, file);
-    if (lstatSync(absolutePath, { throwIfNoEntry: false })?.isFile()) {
+    const entry = lstatSync(absolutePath, { throwIfNoEntry: false });
+    if (entry?.isFile()) {
       files.set(file, readFileSync(absolutePath, 'utf8'));
+    } else if (file === GRAPH_FILE && entry) {
+      // A graph path that is not a regular file must not disable validation.
+      files.set(file, '');
     }
   }
 
@@ -89,9 +107,20 @@ export async function runGuardrails() {
     }
   }
 
+  return { files, trackedPaths, trackedSet, indexFiles, presentPaths };
+}
+
+export function runGraph() {
+  const { files, trackedSet, indexFiles } = collectRepositoryFiles();
+  return inspectRepositoryGraph(files, readIndexGraph(trackedSet, indexFiles));
+}
+
+export async function runGuardrails() {
+  const { files, trackedPaths, trackedSet, indexFiles, presentPaths } = collectRepositoryFiles();
   const envKeys = files.has(ENV_SCHEMA) ? await loadEnvKeys(join(root, ENV_SCHEMA)) : undefined;
   const indexEnv = await readIndexEnv(trackedSet, files, envKeys);
-  return scanGuardrails({ envKeys, files, trackedPaths, indexFiles, presentPaths, indexEnv });
+  const indexGraphSnapshot = readIndexGraph(trackedSet, indexFiles);
+  return scanGuardrails({ envKeys, files, trackedPaths, indexFiles, presentPaths, indexEnv, indexGraphSnapshot });
 }
 
 export function printGuardrails(result, json) {
