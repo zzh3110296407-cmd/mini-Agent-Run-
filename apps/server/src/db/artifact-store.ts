@@ -8,8 +8,13 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { sliceTextContent } from '../fs/file-slice.js';
 
-type MetadataRow = Omit<ArtifactMeta, 'summary'> & { summaryJson: string };
-type ContentRow = { content: string | Buffer };
+type SqliteText = string | Buffer;
+type MetadataRow = Omit<ArtifactMeta, 'summary' | 'sourceTool' | 'title'> & {
+  sourceTool: SqliteText;
+  title: SqliteText;
+  summaryJson: string;
+};
+type ContentRow = { content: SqliteText };
 type SliceQuery = Parameters<typeof sliceTextContent>[1];
 
 const metadataColumns = `id, run_id AS runId, session_id AS sessionId, tool_call_id AS toolCallId,
@@ -23,12 +28,23 @@ const sliceQuery = z.object({
   q: z.string().optional(),
 });
 
-function parseMetadata({ summaryJson, ...metadata }: MetadataRow) {
-  return ArtifactMetaSchema.parse({ ...metadata, summary: JSON.parse(summaryJson) });
+function encodeSqliteText(text: string): SqliteText {
+  // SQLite TEXT encodes as UTF-8. A UTF-16 BLOB preserves lone code units when present.
+  return /[\uD800-\uDFFF]/u.test(text) ? Buffer.from(text, 'utf16le') : text;
+}
+
+function decodeSqliteText(value: SqliteText): string {
+  return typeof value === 'string' ? value : value.toString('utf16le');
+}
+
+function parseMetadata({ summaryJson, sourceTool, title, ...metadata }: MetadataRow) {
+  return ArtifactMetaSchema.parse({
+    ...metadata, sourceTool: decodeSqliteText(sourceTool), title: decodeSqliteText(title), summary: JSON.parse(summaryJson),
+  });
 }
 
 function sliceArtifact({ content }: ContentRow, query: SliceQuery) {
-  return sliceTextContent(typeof content === 'string' ? content : content.toString('utf16le'), query, classifyTraceLine);
+  return sliceTextContent(decodeSqliteText(content), query, classifyTraceLine);
 }
 
 function countLines(text: string) {
@@ -60,10 +76,14 @@ export function createSqliteArtifactStore(db: Database.Database): ArtifactStoreP
         lineCount: countLines(raw),
         createdAt: new Date().toISOString(),
       });
-      // SQLite TEXT encodes as UTF-8. Keep lone UTF-16 code units lossless with a BLOB in that case.
-      const content = /[\uD800-\uDFFF]/u.test(raw) ? Buffer.from(raw, 'utf16le') : raw;
-      const { summary, ...metadata } = artifact;
-      insert.run({ ...metadata, content, summaryJson: JSON.stringify(summary) });
+      const { summary, sourceTool, title, ...metadata } = artifact;
+      insert.run({
+        ...metadata,
+        sourceTool: encodeSqliteText(sourceTool),
+        title: encodeSqliteText(title),
+        content: encodeSqliteText(raw),
+        summaryJson: JSON.stringify(summary),
+      });
       return artifact;
     },
     getMeta(artifactId) {

@@ -85,6 +85,41 @@ async function readHttp(app: App, id: string, query = '') {
 }
 
 describe('[F04_LARGE_ARTIFACT_STORE] SQLite persistence, HTTP and tool slice coordinates', () => {
+  it('round-trips accepted title and source tool metadata immediately, after reopen, and over HTTP', () =>
+    withDatabase(async (dbPath) => {
+      const options = { dbPath, allowedTraceRoots: [demo] };
+      const app = buildApp(options);
+      const savedArtifacts = [];
+      const content = 'INFO ' + '中'.repeat(2400) + '\uD800';
+      try {
+        const session = await bind(app, demo);
+        seedRun(dbPath, session.id);
+        for (const metadata of [
+          { title: '诊断🙂', sourceTool: 'search_logs' },
+          { title: '诊断\uD800', sourceTool: 'search\uDFFF' },
+        ]) {
+          const saved = await app.artifactStore.save({ ...artifactInput(session.id, content), ...metadata });
+          expect(saved).toMatchObject(metadata);
+          expect(await app.artifactStore.getMeta(saved.id)).toEqual(saved);
+          savedArtifacts.push(saved);
+        }
+      } finally {
+        await app.close();
+      }
+
+      const reopened = buildApp(options);
+      try {
+        for (const saved of savedArtifacts) {
+          expect(await reopened.artifactStore.getMeta(saved.id)).toEqual(saved);
+          const { artifact, slice } = await readHttp(reopened, saved.id);
+          expect(artifact).toEqual(saved);
+          expect(slice.lines[0]?.text).toBe(content);
+        }
+      } finally {
+        await reopened.close();
+      }
+    }));
+
   it('persists exact content, rejects cross-session and missing runs, and clears all four tables on delete', () =>
     withDatabase(async (dbPath) => {
       const first = buildApp({ dbPath, allowedTraceRoots: [demo] });
