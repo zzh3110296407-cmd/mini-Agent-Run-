@@ -4,6 +4,7 @@ import {
 } from '@mini-agent-run/ai';
 import { ToolCallIdSchema } from '@mini-agent-run/shared';
 import fc from 'fast-check';
+import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 
 const model = 'fixture-model';
@@ -210,6 +211,79 @@ describe('[F05_MULTI_TURN_INVESTIGATION] OpenAI-compatible model gateway', () =>
     await expect(collect(provider.stream({ ...request, signal: controller.signal }))).rejects.toMatchObject({ code: 'LLM_TIMEOUT' });
     expect(fetchImpl.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
     expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
+
+  it.each([
+    ['abort', 'LLM_ABORTED'],
+    ['timeout', 'LLM_TIMEOUT'],
+  ] as const)('cleans up on %s while paused between two tool deltas in the same SSE event', async (mode, code) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const controller = new AbortController();
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(sink) {
+        sink.enqueue(encoder.encode(event({ tool_calls: [0, 1].map((index) => ({
+          index, id: 'call_' + index, function: { name: 'inspect', arguments: '{}' },
+        })) })));
+      },
+      cancel,
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(body));
+    const provider = createOpenAICompatibleProvider({
+      baseUrl, apiKey, fetchImpl, timeoutMs: mode === 'timeout' ? 10 : 60_000,
+    });
+    const iterator = provider.stream({ ...request, signal: controller.signal });
+    try {
+      expect(await iterator.next()).toMatchObject({ value: { type: 'toolcall_delta', toolCallId: 'tc_call_0' } });
+      expect(body.locked).toBe(true);
+      expect(vi.getTimerCount()).toBe(1);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+
+      if (mode === 'abort') controller.abort();
+      else await vi.advanceTimersByTimeAsync(10);
+      const paused = {
+        transportAborted: fetchImpl.mock.calls[0]?.[1]?.signal?.aborted,
+        locked: body.locked,
+        cancellations: cancel.mock.calls.length,
+        requestTimers: vi.getTimerCount(),
+        callerAbortListeners: getEventListeners(controller.signal, 'abort').length,
+      };
+      const resumed = await iterator.next().then(
+        ({ value }) => ({ chunk: value }),
+        (error: unknown) => ({ code: error instanceof LLMProviderError ? error.code : undefined }),
+      );
+      expect({ paused, resumed }).toEqual({
+        paused: { transportAborted: true, locked: false, cancellations: 1, requestTimers: 0, callerAbortListeners: 0 },
+        resumed: { code },
+      });
+      expect(await iterator.return(undefined)).toEqual({ done: true, value: undefined });
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(body.locked).toBe(false);
+    } finally {
+      await iterator.return(undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears request resources when delivering done, before the consumer closes the iterator', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const controller = new AbortController();
+    const body = byteStream(done);
+    const provider = createOpenAICompatibleProvider({
+      baseUrl, apiKey, timeoutMs: 10, fetchImpl: async () => new Response(body),
+    });
+    const iterator = provider.stream({ ...request, signal: controller.signal });
+    try {
+      expect(await iterator.next()).toEqual({ done: false, value: { type: 'done', stopReason: 'stop' } });
+      expect(body.locked).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      controller.abort();
+      expect(await iterator.next()).toEqual({ done: true, value: undefined });
+    } finally {
+      await iterator.return(undefined);
+      vi.useRealTimers();
+    }
   });
 
   it('reassembles arbitrary UTF-8 byte cuts across 100 seeded SSE sequences', async () => {

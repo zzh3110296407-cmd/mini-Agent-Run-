@@ -1,5 +1,5 @@
 import { ToolCallRequestSchema } from '@mini-agent-run/shared';
-import { aborted, ensureActive, releaseReader, whileActive } from './abort.js';
+import { aborted, ensureActive, openAbortableReader, whileActive } from './abort.js';
 import { LLMProviderError, redactSecret, type LLMErrorCode } from './errors.js';
 import type { LLMGenerateRequest, LLMMessage, LLMProvider, LLMStreamChunk } from './index.js';
 import { parseSseByteStream } from './sse.js';
@@ -46,7 +46,7 @@ function statusError(status: number): LLMErrorCode {
 
 async function readErrorText(body: ReadableStream<Uint8Array> | null, signal: AbortSignal) {
   if (!body) return '';
-  const reader = body.getReader();
+  const { reader, close } = openAbortableReader(body, signal);
   const decoder = new TextDecoder('utf-8');
   let remaining = 4096;
   let text = '';
@@ -61,7 +61,7 @@ async function readErrorText(body: ReadableStream<Uint8Array> | null, signal: Ab
     }
     return text + decoder.decode();
   } finally {
-    await releaseReader(reader, signal);
+    await close();
   }
 }
 
@@ -194,12 +194,22 @@ export class OpenAICompatibleProvider implements LLMProvider {
     const stop = (error: LLMProviderError) => {
       if (!controller.signal.aborted) {
         cancellation = error;
+        disposeDeadline();
         controller.abort();
       }
     };
     const onAbort = () => stop(aborted());
+    let timer: ReturnType<typeof setTimeout> | undefined =
+      setTimeout(() => stop(new LLMProviderError('LLM_TIMEOUT', 'The model request timed out.')), this.#timeoutMs);
     signal?.addEventListener('abort', onAbort, { once: true });
-    const timer = setTimeout(() => stop(new LLMProviderError('LLM_TIMEOUT', 'The model request timed out.')), this.#timeoutMs);
+
+    function disposeDeadline() {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+      signal?.removeEventListener('abort', onAbort);
+    }
+
     let response: Response | undefined;
     try {
       let body: string;
@@ -212,6 +222,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       } catch {
         throw new LLMProviderError('LLM_BAD_REQUEST', 'The model request could not be serialized.');
       }
+      ensureActive(controller.signal);
       response = await whileActive(this.#fetch(this.#endpoint, {
         method: 'POST', headers: { Authorization: 'Bearer ' + this.#apiKey, 'Content-Type': 'application/json' },
         body, signal: controller.signal, redirect: 'manual',
@@ -225,7 +236,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
           `The model endpoint returned HTTP ${response.status}.` + (detail ? ' ' + detail : ''), response.status);
       }
       if (!response.body) throw protocol('The model response has no stream body.');
-      yield* streamCompletion(response.body, controller.signal);
+      for await (const chunk of streamCompletion(response.body, controller.signal)) {
+        ensureActive(controller.signal);
+        if (chunk.type === 'done') disposeDeadline();
+        yield chunk;
+        ensureActive(controller.signal);
+      }
     } catch (error) {
       if (cancellation) throw cancellation;
       if (error instanceof LLMProviderError) {
@@ -234,8 +250,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       if (response?.ok) throw protocol('The model response stream was interrupted.');
       throw new LLMProviderError('LLM_NETWORK_ERROR', 'The model endpoint could not be reached.');
     } finally {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
+      disposeDeadline();
       controller.abort();
     }
   }

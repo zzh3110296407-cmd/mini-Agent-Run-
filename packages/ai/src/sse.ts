@@ -1,9 +1,9 @@
-import { ensureActive, releaseReader, whileActive } from './abort.js';
+import { ensureActive, openAbortableReader, whileActive } from './abort.js';
 
 export async function* parseSseByteStream(
   stream: ReadableStream<Uint8Array>, signal?: AbortSignal,
 ): AsyncGenerator<string> {
-  const reader = stream.getReader();
+  const { reader, close } = openAbortableReader(stream, signal);
   const decoder = new TextDecoder('utf-8');
   let pending = '';
   let data: string[] = [];
@@ -44,6 +44,6 @@ export async function* parseSseByteStream(
       }
     }
   } finally {
-    await releaseReader(reader, signal);
+    await close();
   }
 }

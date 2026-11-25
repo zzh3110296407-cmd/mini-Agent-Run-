@@ -21,10 +21,27 @@ export async function whileActive<T>(work: Promise<T>, signal?: AbortSignal): Pr
   }
 }
 
-export async function releaseReader(reader: ReadableStreamDefaultReader<Uint8Array>, signal?: AbortSignal): Promise<void> {
-  try {
-    await whileActive(reader.cancel().catch(() => {}), signal).catch(() => {});
-  } finally {
-    reader.releaseLock();
+export function openAbortableReader(stream: ReadableStream<Uint8Array>, signal?: AbortSignal) {
+  ensureActive(signal);
+  const reader = stream.getReader();
+  let closing: Promise<void> | undefined;
+
+  function close() {
+    if (!closing) {
+      signal?.removeEventListener('abort', onAbort);
+      const cancel = reader.cancel().catch(() => {});
+      reader.releaseLock();
+      closing = whileActive(cancel, signal).catch(() => {});
+    }
+    return closing;
   }
+
+  function onAbort() {
+    void close();
+  }
+
+  // An async generator can be suspended at a yield when the signal fires.
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  return { reader, close };
 }
