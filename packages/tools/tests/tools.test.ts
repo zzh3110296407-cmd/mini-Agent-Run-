@@ -1,0 +1,335 @@
+import type { ArtifactStorePort, ToolExecutionContext, TraceWorkspacePort } from '@mini-agent-run/agent';
+import { ArtifactMetaSchema, TextSliceResponseSchema, TraceOverviewSchema, type TextSliceResponse } from '@mini-agent-run/shared';
+import { analyzeTraceContent, createToolRegistry, sanitizeTraceContent, truncateUtf8Safe } from '@mini-agent-run/tools';
+import fc from 'fast-check';
+import { setImmediate as nextTurn } from 'node:timers/promises';
+import { describe, expect, it, vi } from 'vitest';
+
+const fileNames = ['list_files', 'inspect_trace', 'read_file_slice', 'search_logs', 'read_artifact_slice',
+  'compare_files', 'check_runtime_diagnostics'];
+const iso = '2026-11-25T00:00:00.000Z';
+const targetPath = '/fixture';
+const charLimit = 6144;
+
+function page(lines: TextSliceResponse['lines'], nextOffsetLine: number | null = null): TextSliceResponse {
+  return { totalLines: lines.length, matchedLines: lines.length, offsetLine: 1, limit: 200,
+    hasMore: nextOffsetLine !== null, nextOffsetLine, lines };
+}
+
+function artifactMeta(sessionId: string) {
+  return ArtifactMetaSchema.parse({
+    id: 'art_one', sessionId, runId: 'run_one', toolCallId: 'tc_one', sourceTool: 'search_logs', title: 'Trace output',
+    contentType: 'text/plain', byteSize: 42, lineCount: 3, createdAt: iso,
+    summary: {
+      byteSize: 42, lineCount: 3, truncatedForLlm: true,
+      levelCounts: { error: 0, warn: 0, info: 3, other: 0 }, firstErrorLine: null, previewHead: 'trace output',
+    },
+  });
+}
+
+function build(fixtures: Record<string, string> = {}, options: {
+  store?: ArtifactStorePort; onRead?: () => void; file?: string;
+} = {}) {
+  const artifactStore: ArtifactStorePort = options.store ?? {
+    save: () => { throw new Error('Not needed'); }, getMeta: () => null, readSlice: () => null,
+  };
+  const bound = options.file ?? targetPath;
+  const pathType = options.file === undefined ? 'dir' : 'file';
+  const workspace: TraceWorkspacePort = {
+    binding: { targetPath: bound, pathType },
+    resolveTarget: vi.fn(() => ({ realPath: bound, kind: pathType })),
+    listFiles: vi.fn(() => ({
+      entries: Object.keys(fixtures).sort().map((relativePath) => ({
+        relativePath, kind: 'file' as const, byteSize: Buffer.byteLength(fixtures[relativePath] ?? ''), modifiedAt: iso,
+      })),
+      truncated: false,
+    })),
+    readFile: vi.fn((filename) => {
+      options.onRead?.();
+      const relativePath = filename ?? options.file ?? '';
+      const content = fixtures[relativePath];
+      if (content === undefined) throw Object.assign(new Error('private filesystem detail'), { code: 'PATH_NOT_FOUND' });
+      return { relativePath, content, byteSize: Buffer.byteLength(content) };
+    }),
+    sliceText: vi.fn((content, { offsetLine, limit, level, q }) => {
+      const rows = content === '' ? [] : content.replace(/\r?\n$/, '').split(/\r?\n/);
+      const valid = rows.map((text, index) => ({
+        text, lineNumber: index + 1, level: /\bERROR\b/.test(text) ? 'error' as const : 'info' as const,
+      })).filter((row) => (level === undefined || row.level === level) && (!q || row.text.toLowerCase().includes(q.toLowerCase())));
+      const candidates = valid.filter((row) => row.lineNumber >= offsetLine);
+      const nextOffsetLine = candidates[limit]?.lineNumber ?? null;
+      return { totalLines: rows.length, matchedLines: valid.length, offsetLine, limit,
+        lines: candidates.slice(0, limit), nextOffsetLine, hasMore: nextOffsetLine !== null };
+    }),
+  };
+  const tools = createToolRegistry({ workspace, toolMode: 'mock', artifactStore });
+  const ctx: ToolExecutionContext = {
+    sessionId: 'ses_one', runId: 'run_one', targetPath: bound, allowedRoots: ['/fixture'],
+    toolMode: 'mock', artifactStore, signal: new AbortController().signal,
+  };
+  async function call(name: string, args: Record<string, unknown> = {}, context: Partial<ToolExecutionContext> = {}) {
+    const tool = tools.find((entry) => entry.name === name);
+    if (!tool) throw new Error('Unregistered tool: ' + name);
+    const result = await tool.execute(args, { ...ctx, ...context });
+    return { ...result, data: JSON.parse(result.content) };
+  }
+  return { workspace, tools, call };
+}
+
+function expectError(result: { isError: boolean; data: unknown }, code: string) {
+  expect(result.isError).toBe(true);
+  expect(result.data).toEqual({ error: { code, message: expect.any(String) } });
+}
+
+function jsonl(rows: unknown[]) {
+  return rows.map((row) => JSON.stringify(row)).join('\n');
+}
+
+describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
+  it('registers all seven tools with object schemas and validates inputs and the session binding', async () => {
+    const { tools, workspace, call } = build({ 'trace.json': '{}' });
+    expect(tools.map(({ name }) => name)).toEqual(fileNames);
+    for (const { description, parameters } of tools) {
+      expect(description).toBeTruthy();
+      expect(parameters).toMatchObject({ type: 'object', properties: expect.any(Object), additionalProperties: false });
+    }
+    expect(tools.find(({ name }) => name === 'compare_files')?.parameters.required).toEqual(['fileA', 'fileB']);
+    expectError(await call('list_files', { maxFiles: 201 }), 'INVALID_TOOL_ARGUMENTS');
+    expectError(await call('compare_files', { fileA: 'trace.json' }), 'INVALID_TOOL_ARGUMENTS');
+    expectError(await call('list_files', {}, { targetPath: '/other' }), 'WORKSPACE_BINDING_MISMATCH');
+    expect(workspace.listFiles).not.toHaveBeenCalled();
+    const listing = await call('list_files', { maxFiles: 1, maxDepth: 0 });
+    expect(listing.data).toEqual({
+      files: [{ path: 'trace.json', byteSize: 2, modifiedAt: iso, extension: '.json' }], total: 1, truncated: false,
+    });
+    expect(workspace.listFiles).toHaveBeenCalledWith(['/fixture'], { maxFiles: 1, maxDepth: 0 });
+  });
+
+  it('parses four formats and distinguishes tool failure, stopping and task outcome', async () => {
+    const bench = {
+      metadata: { dataset: 'trajerrbench', reward: 0, task_description: 'Trace a local packet' },
+      messages: [
+        { step: 0, role: 'assistant', content: '[tool_calls]\n- lookup(value=1)' },
+        { step: 1, role: 'assistant', content: '[tool_calls]\n- lookup(value=1)' },
+        { step: 2, role: 'tool', name: 'lookup', content: 'ERROR: lookup did not complete', duration_ms: 3200 },
+        { step: 3, role: 'assistant', content: 'Final response\n###STOP###' },
+      ],
+    };
+    const generic = { messages: [{ role: 'assistant', toolCalls: [{ id: 'tc_one', name: 'probe' }] }] };
+    const logs = jsonl([
+      { type: 'tool_call', step: 0, toolName: 'probe', isError: true },
+      { taskOutcome: 'passed', stopReason: 'completed' },
+    ]);
+    const { call } = build({ 'bench.json': JSON.stringify(bench), 'generic.json': JSON.stringify(generic),
+      'trace.jsonl': logs, 'trace.log': 'INFO starting\nERROR exception\nWARN durationMs: 2250\n' });
+    const overview = async (file: string) => TraceOverviewSchema.parse((await call('inspect_trace', { file })).data);
+    expect(await overview('bench.json')).toMatchObject({
+      format: 'trajerrbench_json', threeState: { taskOutcome: 'failed', terminationReason: '###STOP###', toolErrorCount: 1 },
+      anomalies: { firstError: { step: 2, line: 1 }, retryLoops: [{ toolName: 'lookup', startStep: 0, endStep: 1, repeatCount: 2 }],
+        slowSpans: [{ step: 2, durationMs: 3200 }] },
+    });
+    expect(await overview('generic.json')).toMatchObject({
+      format: 'generic_json', threeState: { hasToolError: false, taskOutcome: 'unknown' },
+    });
+    expect(await overview('trace.jsonl')).toMatchObject({
+      format: 'jsonl', threeState: { taskOutcome: 'passed', terminationReason: 'completed', hasToolError: true },
+    });
+    expect(await overview('trace.log')).toMatchObject({
+      format: 'plain_text', anomalies: { firstError: { line: 2 }, slowSpans: [{ durationMs: 2250 }] },
+    });
+  });
+
+  it('removes escaped and overwritten keys before every reading tool while retaining original positions', async () => {
+    const original = [
+      '{', '  "metadata":{"annotation":"answer-normal"},',
+      '  "repeated":{"\\u0061nnotation":"answer-overwritten"},',
+      '  "repeated":{"safe":true},',
+      '  "steps":[', '    { "step": 7, "\\u0061nnotation":', '      {"nested":"answer-escaped"},',
+      '      "toolName": "probe", "isError": true, "message": "ERROR at original line" }', '  ]', '}',
+    ].join('\r\n') + '\r\n';
+    const rows = '{"annotation":"answer-jsonl","step":2}\r\n\r\n'
+      + '{"step":8,"toolName":"probe","isError":true,"message":"ERROR at original line"}\r\n';
+    const { call } = build({ 'trace.json': original, 'trace.jsonl': rows, 'renamed.log': original });
+    for (const [file, originalLine, step] of [['trace.json', 8, 7], ['trace.jsonl', 3, 8], ['renamed.log', 8, 7]] as const) {
+      const results = await Promise.all([
+        call('inspect_trace', { file }), call('read_file_slice', { file, startLine: originalLine, limit: 1 }),
+        call('search_logs', { file, query: 'original line', contextLines: 1 }),
+        call('compare_files', { fileA: file, fileB: file }),
+        call('read_file_slice', { file, startStep: step, endStep: step }),
+      ]);
+      for (const result of results) {
+        expect(result.isError, result.content).toBe(false);
+        expect(result.content).not.toMatch(/answer-|annotation|critical_error|ground_truth/);
+      }
+      expect(results[0]?.data.anomalies.firstError.line).toBe(originalLine);
+      expect(results[1]?.data.lines[0]).toMatchObject({ lineNumber: originalLine });
+      expect(results[2]?.data.matches[0]).toMatchObject({ lineNumber: originalLine });
+      expect(results[4]?.data.steps).toEqual([expect.objectContaining({ step })]);
+    }
+    const cleaned = sanitizeTraceContent(original, 'trace.json');
+    expect(cleaned.ok).toBe(true);
+    if (!cleaned.ok) throw Error(cleaned.message);
+    expect(cleaned.sanitized.length).toBe(original.length);
+    expect([...cleaned.sanitized.matchAll(/\r\n/g)].map(({ index }) => index))
+      .toEqual([...original.matchAll(/\r\n/g)].map(({ index }) => index));
+    expect(JSON.parse(cleaned.sanitized).repeated).toEqual({ safe: true });
+    expect(sanitizeTraceContent('{\n  "x": 1\n}\n', 'clean.json')).toMatchObject({
+      sanitized: '{\n  "x": 1\n}\n', stripped: false,
+    });
+    expect(sanitizeTraceContent('[0, {"annotation": "answer-in-array"}]', 'renamed.log')).toMatchObject({
+      ok: true, stripped: true, parsedJson: [0, {}],
+    });
+  });
+
+  it.each([
+    ['broken.json', '{\n "annotation":\n "private answer"\n'],
+    ['broken.jsonl', '{"annotation":"private answer"}\n{"incomplete":\n'],
+    ['broken.log', 'INFO local fixture\n{"annotation":"private answer"\n'],
+  ])('fails closed without exposing damaged structured content in %s', async (file, content) => {
+    const { call } = build({ [file]: content, 'clean.log': 'INFO good\n' });
+    for (const response of await Promise.all([
+      call('inspect_trace', { file }), call('read_file_slice', { file }), call('search_logs', { file, query: 'answer' }),
+      call('compare_files', { fileA: 'clean.log', fileB: file }),
+    ])) {
+      expectError(response, 'UNSANITIZABLE_TRACE_JSON');
+      expect(response.content).not.toContain('private answer');
+    }
+    expect((await call('search_logs', { query: 'good' })).data).toMatchObject({
+      warnings: [{ file, code: 'UNSANITIZABLE_TRACE_JSON' }], totalMatches: 1, filesSearched: 1,
+    });
+  });
+
+  it('slices original line and step positions and returns a byte-bounded continuation', async () => {
+    const rows = jsonl([{ step: 7, content: '🚀'.repeat(5100) }, { step: 8, content: 'INFO ok' }]);
+    const { call } = build({ 'trace.jsonl': rows });
+    const first = await call('read_file_slice', { file: 'trace.jsonl', limit: 2 });
+    expect(first.isError).toBe(false);
+    expect(Buffer.byteLength(first.content)).toBeLessThanOrEqual(charLimit);
+    expect(first.data).toMatchObject({ lines: [{ lineNumber: 1 }], lineTruncated: true, hasMore: true, nextOffsetLine: 2 });
+    const second = await call('read_file_slice', { file: 'trace.jsonl', startLine: 2, level: 'info', q: 'ok' });
+    expect(TextSliceResponseSchema.parse(second.data).lines.map(({ lineNumber }) => lineNumber)).toEqual([2]);
+    const steps = await call('read_file_slice', { file: 'trace.jsonl', startStep: 7, endStep: 8 });
+    expect(Buffer.byteLength(steps.content)).toBeLessThanOrEqual(charLimit);
+    expect(steps.data).toMatchObject({ steps: [{ step: 7, line: 1 }], hasMore: true, nextStep: 8, stepTruncated: true });
+  });
+
+  it('searches by keyword, regex, severity and context, and rejects unsupported regexes', async () => {
+    const { call } = build({ 'trace.log': 'INFO context\nERROR local timeout\nWARN after\nERROR again\n' });
+    const accepted = await call('search_logs', { regex: '^ERROR.*timeout$', level: 'error', contextLines: 1 });
+    expect(accepted.data).toMatchObject({
+      matches: [{ file: 'trace.log', lineNumber: 2, text: 'ERROR local timeout',
+        contextBefore: [{ lineNumber: 1 }], contextAfter: [{ lineNumber: 3 }] }], totalMatches: 1,
+    });
+    expect((await call('search_logs', { query: 'error', maxMatches: 1 })).data).toMatchObject({
+      totalMatches: 2, truncated: true, matches: [{ lineNumber: 2 }],
+    });
+    for (const regex of ['[', '(a)\\1', 'x(?=y)', '(a+)+', 'x'.repeat(201)]) {
+      expectError(await call('search_logs', { regex }), 'INVALID_REGEX');
+    }
+  });
+
+  it('cooperatively stops in the middle of one large file and of a long physical line', async () => {
+    for (const text of ['INFO diagnostic event without requested term\n'.repeat(452_000), 'x'.repeat(19 * 1024 * 1024)]) {
+      const controller = new AbortController();
+      let yielded = 0;
+      let turn: Promise<void> | undefined;
+      const { call } = build({ 'this.log': text }, {
+        onRead: () => {
+          turn = nextTurn().then(() => { yielded++; return nextTurn(); }).then(() => { yielded++; controller.abort(); });
+        },
+      });
+      const result = await call('search_logs', { file: 'this.log', regex: 'ERROR.*needle' }, { signal: controller.signal });
+      await turn;
+      expect(yielded).toBe(2);
+      expectError(result, 'TOOL_ABORTED');
+    }
+  });
+
+  it('checks artifact ownership before reading, handles missing IDs and caps UTF-8 bytes and lines', async () => {
+    let meta = artifactMeta('ses_other');
+    const getMeta = vi.fn(() => meta);
+    const readSlice = vi.fn(() => page([{ lineNumber: 1, level: 'info', text: 'hello' }]));
+    const { call } = build({}, { store: { getMeta, readSlice, save: () => meta } });
+    expectError(await call('read_artifact_slice', { artifactId: 'invalid' }), 'INVALID_TOOL_ARGUMENTS');
+    expect(getMeta).not.toHaveBeenCalled();
+    expectError(await call('read_artifact_slice', { artifactId: 'art_one' }), 'ARTIFACT_FORBIDDEN');
+    expect(readSlice).not.toHaveBeenCalled();
+    meta = artifactMeta('ses_one');
+    const ordinary = await call('read_artifact_slice', { artifactId: 'art_one', startLine: 1, limit: 1, query: 'hello' });
+    expect(ordinary.isError).toBe(false);
+    expect(ordinary.data.lines).toEqual([{ lineNumber: 1, level: 'info', text: 'hello' }]);
+    expect(readSlice).toHaveBeenLastCalledWith('art_one', { offsetLine: 1, limit: 1, level: undefined, query: 'hello' });
+    readSlice.mockReturnValueOnce(page(Array.from({ length: 3 }, (_, index) => ({
+      lineNumber: 5 + index, level: 'info', text: '文'.repeat(1000),
+    }))));
+    const pageResult = await call('read_artifact_slice', { artifactId: 'art_one', startLine: 5 });
+    expect(Buffer.byteLength(pageResult.content)).toBeLessThanOrEqual(charLimit);
+    expect(pageResult.data).toMatchObject({ hasMore: true, nextOffsetLine: 6, lines: [{ lineNumber: 5 }] });
+    readSlice.mockReturnValueOnce(page([
+      { lineNumber: 1, level: 'info', text: '🚀中文'.repeat(2300) }, { lineNumber: 2, level: 'info', text: 'after' },
+    ]));
+    const long = await call('read_artifact_slice', { artifactId: 'art_one' });
+    expect(Buffer.byteLength(long.content)).toBeLessThanOrEqual(charLimit);
+    expect(long.data).toMatchObject({ lineTruncated: true, hasMore: true, nextOffsetLine: 2 });
+    expect(long.data.lines[0].text).not.toMatch(/[\uD800-\uDFFF]/u);
+    readSlice.mockReturnValueOnce(page([{ lineNumber: 1, level: 'info', text: 'broken\uD800text' }]));
+    expect((await call('read_artifact_slice', { artifactId: 'art_one' })).data.lines[0].text).toBe('broken\uFFFDtext');
+
+    const missing = build();
+    expectError(await missing.call('read_artifact_slice', { artifactId: 'art_missing' }), 'ARTIFACT_NOT_FOUND');
+    readSlice.mockReturnValueOnce(page(Array.from({ length: 250 }, (_, index) => ({
+      lineNumber: index + 1, level: 'info', text: '',
+    }))));
+    const max = await call('read_artifact_slice', { artifactId: 'art_one' });
+    expect(max.data.lines.length).toBeLessThanOrEqual(200);
+    expect(Buffer.byteLength(max.content)).toBeLessThanOrEqual(charLimit);
+  });
+
+  it('detects the exact call-sequence divergence when summary metrics match', async () => {
+    const a = jsonl([{ step: 3, toolName: 'first' }, { step: 9, toolName: 'other' }]);
+    const b = jsonl([{ step: 3, toolName: 'other' }, { step: 9, toolName: 'first' }]);
+    expect(analyzeTraceContent('same.jsonl', a)).toEqual(analyzeTraceContent('same.jsonl', b));
+    const { call } = build({ 'a.jsonl': a, 'b.jsonl': b });
+    expect((await call('compare_files', { fileA: 'a.jsonl', fileB: 'b.jsonl' })).data).toMatchObject({
+      firstDivergenceStep: 3, toolSequenceDiff: { callA: { step: 3, toolName: 'first' },
+        callB: { step: 3, toolName: 'other' } },
+    });
+  });
+
+  it('cancels the mock heartbeat and timers and bypasses fixtures in live mode', async () => {
+    const { call, workspace } = build({ 'diagnostics.fixture.json': JSON.stringify({
+      defaultScenario: 'slow', slow: { delayMs: 4000, progressIntervalMs: 500 },
+      error: { errorCode: 'MOCK_UPSTREAM_TIMEOUT' },
+    }) });
+    expect((await call('check_runtime_diagnostics', {}, { toolMode: 'live' })).data).toMatchObject({
+      mode: 'live', status: 'healthy', fileCount: 1,
+    });
+    expect(workspace.readFile).not.toHaveBeenCalled();
+    expectError(await call('check_runtime_diagnostics', { scenario: 'error' }), 'MOCK_UPSTREAM_TIMEOUT');
+
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const onProgress = vi.fn(() => { controller.abort(); });
+      const running = call('check_runtime_diagnostics', {}, { signal: controller.signal, onProgress });
+      await vi.advanceTimersByTimeAsync(500);
+      expectError(await running, 'TOOL_ABORTED');
+      expect(onProgress).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps UTF-8 truncation inside the byte budget without isolated surrogate code units', () => {
+    fc.assert(fc.property(
+      fc.array(fc.constantFrom('a', '文', '😊', '🚀', '𠮷', '\uD800', '\uDFFF'), { maxLength: 300 }),
+      fc.integer({ min: 0, max: 6144 }),
+      (points, limit) => {
+        const result = truncateUtf8Safe(points.join(''), limit);
+        expect(Buffer.byteLength(result.text)).toBeLessThanOrEqual(limit);
+        expect(result.text).not.toMatch(/[\uD800-\uDFFF]/u);
+      },
+    ), { numRuns: 128, seed: 20261125 });
+  });
+});

@@ -1,7 +1,7 @@
 {
   "version": "1.1",
   "milestones": ["M0", "M1-1", "M1-2", "M1-3", "M1-4", "M1-5", "M2", "M3", "M4"],
-  "activeMilestone": "M1-3",
+  "activeMilestone": "M1-4",
   "nodes": [
     {
       "id": "F01_SAFE_PATH_BROWSE",

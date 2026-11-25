@@ -114,8 +114,9 @@ describe('M1.1 G-03 workspace boundaries', () => {
     },
     {
       name: 'tools', file: 'packages/tools/src/probe.ts',
-      denied: ['@mini-agent-run/ai', '@mini-agent-run/debug-agent', 'fastify', 'better-sqlite3', 'vue', 'openai', 'dotenv'],
-      path: '../../ai/src/index.js', allowed: ['@mini-agent-run/shared', '@mini-agent-run/agent', 'node:fs/promises'],
+      denied: ['@mini-agent-run/ai', '@mini-agent-run/debug-agent', 'fastify', 'better-sqlite3', 'vue', 'openai', 'dotenv',
+        'fs', 'node:fs', 'fs/promises', 'node:fs/promises'],
+      path: '../../ai/src/index.js', allowed: ['@mini-agent-run/shared', '@mini-agent-run/agent'],
     },
     {
       name: 'debug-agent', file: 'packages/debug-agent/src/probe.ts',

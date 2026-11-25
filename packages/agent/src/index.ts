@@ -1,5 +1,5 @@
 import type {
-  AgentMessage, ArtifactContentType, ArtifactMeta, LogLevel, TextSliceResponse, ToolMode, ToolOutputSummary,
+  AgentMessage, ArtifactContentType, ArtifactMeta, LogLevel, PathType, TextSliceResponse, ToolMode, ToolOutputSummary,
 } from '@mini-agent-run/shared';
 
 export const AGENT_PACKAGE_NAME = '@mini-agent-run/agent';
@@ -31,6 +31,44 @@ export interface ArtifactStorePort {
 export interface ToolProgressEvent {
   elapsedMs: number;
   progressMessage?: string;
+}
+
+export interface TraceWorkspaceBinding {
+  readonly targetPath: string;
+  readonly pathType: PathType;
+}
+
+export interface TraceFileEntry {
+  relativePath: string;
+  kind: 'file';
+  byteSize: number;
+  modifiedAt: string;
+}
+
+export interface TraceFileContent {
+  relativePath: string;
+  byteSize: number;
+  content: string;
+}
+
+export interface TraceListResult {
+  entries: readonly TraceFileEntry[];
+  truncated: boolean;
+}
+
+export interface TraceWorkspacePort {
+  readonly binding: TraceWorkspaceBinding;
+  resolveTarget(allowedRoots: readonly string[]): Promise<{ realPath: string; kind: PathType }>
+    | { realPath: string; kind: PathType };
+  listFiles(
+    allowedRoots: readonly string[], options?: { maxFiles?: number; maxDepth?: number },
+  ): Promise<TraceListResult> | TraceListResult;
+  readFile(
+    requestedFile: string | undefined, allowedRoots: readonly string[], options?: { maxBytes?: number },
+  ): Promise<TraceFileContent> | TraceFileContent;
+  sliceText(
+    content: string, query: { offsetLine: number; limit: number; level?: LogLevel; q?: string },
+  ): TextSliceResponse;
 }
 
 export interface ToolExecutionContext {

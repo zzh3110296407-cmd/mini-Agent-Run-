@@ -1,4 +1,6 @@
-import { AGENT_PACKAGE_NAME, type AgentTool, type ArtifactStorePort, type ToolExecutionContext } from '@mini-agent-run/agent';
+import {
+  AGENT_PACKAGE_NAME, type AgentTool, type ArtifactStorePort, type ToolExecutionContext, type TraceWorkspacePort,
+} from '@mini-agent-run/agent';
 import { AI_PACKAGE_NAME, type LLMProvider, type LLMStreamChunk } from '@mini-agent-run/ai';
 import { DEBUG_AGENT_PACKAGE_NAME, type DebugAgentConfig } from '@mini-agent-run/debug-agent';
 import { ArtifactMetaSchema, type ToolOutputSummary } from '@mini-agent-run/shared';
@@ -62,8 +64,20 @@ describe('M1.1 downstream DI contracts', () => {
         return { content: saved.summary.previewHead, isError: false, artifactId: saved.id, summary };
       },
     };
-    const registry = createToolRegistry({ toolMode: 'mock', artifactStore: store });
-    expect(registry).toEqual([]);
+    const workspace: TraceWorkspacePort = {
+      binding: { targetPath: 'trace.json', pathType: 'file' },
+      resolveTarget: () => ({ realPath: 'trace.json', kind: 'file' }),
+      listFiles: () => ({ entries: [], truncated: false }),
+      readFile: () => ({ relativePath: 'trace.json', byteSize: 2, content: '{}' }),
+      sliceText: (_content, { offsetLine, limit }) => ({
+        totalLines: 0, matchedLines: 0, offsetLine, limit, hasMore: false, nextOffsetLine: null, lines: [],
+      }),
+    };
+    const registry = createToolRegistry({ toolMode: 'mock', artifactStore: store, workspace });
+    expect(registry.map(({ name }) => name)).toEqual([
+      'list_files', 'inspect_trace', 'read_file_slice', 'search_logs', 'read_artifact_slice', 'compare_files',
+      'check_runtime_diagnostics',
+    ]);
     const config: DebugAgentConfig = {
       provider, model: 'fixture-model', tools: [...registry, tool],
       transformContext: (messages) => [...messages],

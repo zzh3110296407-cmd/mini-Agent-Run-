@@ -1,0 +1,19 @@
+{
+  "title": "Local diagnostic demo",
+  "description": "Synthetic probe settings for exercising progress, cancellation, and structured errors in mock mode.",
+  "defaultScenario": "slow",
+  "slow": {
+    "delayMs": 4000,
+    "progressIntervalMs": 500,
+    "progressMessage": "Running mock runtime diagnostics..."
+  },
+  "error": {
+    "statusCode": 503,
+    "errorCode": "MOCK_UPSTREAM_TIMEOUT",
+    "message": "Simulated upstream diagnostic probe failure (503)."
+  },
+  "healthy": {
+    "statusCode": 200,
+    "message": "The simulated local probe is healthy."
+  }
+}

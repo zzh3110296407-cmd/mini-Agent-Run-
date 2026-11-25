@@ -222,6 +222,12 @@ export default [
     legacyPaths[name] ?? [],
     'Use dependencies permitted by the workspace DAG.',
   )),
+  boundary(
+    [workspaceFiles('packages/tools/src')],
+    [...externalRestrictions['packages/tools'], ...blockedWorkspaceImports('packages/tools'), 'fs', 'node:fs'],
+    [],
+    'Access trace files through TraceWorkspacePort and use dependencies permitted by the workspace DAG.',
+  ),
   {
     files: workspaces.map(workspaceFiles),
     plugins: { workspace: { rules: { 'runtime-boundary': runtimeBoundary, 'package-dag': packageDag } } },

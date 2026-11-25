@@ -1,7 +1,8 @@
+import type { TraceFileEntry, TraceListResult, TraceWorkspaceBinding } from '@mini-agent-run/agent';
 import { FsBrowseResponseSchema, type FsBrowseEntry, type FsBrowseResponse, type Session } from '@mini-agent-run/shared';
 import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readSync,
   readdirSync, realpathSync, statSync } from 'node:fs';
-import { dirname, extname, join, parse, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const WORKSPACE_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -220,13 +221,24 @@ export function resolveSessionTargetPath(
   return target;
 }
 
-function selectSessionFile(
-  session: Pick<Session, 'targetPath' | 'pathType'>, requestedFile: string | undefined,
-  roots: readonly string[], baseDir: string,
-) {
+function inspectSessionBinding(session: TraceWorkspaceBinding, roots: readonly string[], baseDir: string) {
   const target = inspectTracePath(session.targetPath, roots, baseDir, session.targetPath);
   if (session.pathType === 'file' && !target.metadata.isFile()) throw new PathSandboxError('PATH_NOT_A_FILE');
   if (session.pathType === 'dir' && !target.metadata.isDirectory()) throw new PathSandboxError('PATH_NOT_A_DIRECTORY');
+  return target;
+}
+
+export function validateSessionBinding(
+  session: TraceWorkspaceBinding, roots: readonly string[], baseDir = WORKSPACE_ROOT,
+): ResolvedTracePath {
+  const { realPath, rootPath } = inspectSessionBinding(session, roots, baseDir);
+  return { realPath, rootPath, kind: session.pathType };
+}
+
+function selectSessionFile(
+  session: TraceWorkspaceBinding, requestedFile: string | undefined, roots: readonly string[], baseDir: string,
+) {
+  const target = inspectSessionBinding(session, roots, baseDir);
 
   if (requestedFile === undefined) {
     if (session.pathType === 'dir') throw new PathSandboxError('INVALID_PATH');
@@ -253,10 +265,10 @@ function selectSessionFile(
   }
 }
 
-export function readSafeSessionFile(
-  session: Pick<Session, 'targetPath' | 'pathType'>, requestedFile: string | undefined,
+export function readSafeSessionFileWithMeta(
+  session: TraceWorkspaceBinding, requestedFile: string | undefined,
   roots: readonly string[], { baseDir = WORKSPACE_ROOT, maxBytes = MAX_FILE_SLICE_BYTES } = {},
-): string {
+) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_FILE_SLICE_BYTES) {
     throw new RangeError('Invalid file-slice byte limit.');
   }
@@ -274,7 +286,9 @@ export function readSafeSessionFile(
     while (bytesRead <= maxBytes) {
       const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - bytesRead));
       const count = withFsErrors(() => readSync(fd, chunk, 0, chunk.length, null));
-      if (count === 0) return Buffer.concat(chunks, bytesRead).toString('utf8');
+      if (count === 0) {
+        return { realPath, byteSize: bytesRead, content: Buffer.concat(chunks, bytesRead).toString('utf8') };
+      }
       bytesRead += count;
       chunks.push(chunk.subarray(0, count));
     }
@@ -282,6 +296,72 @@ export function readSafeSessionFile(
   } finally {
     withFsErrors(() => closeSync(fd));
   }
+}
+
+export function readSafeSessionFile(
+  session: Pick<Session, 'targetPath' | 'pathType'>, requestedFile: string | undefined, roots: readonly string[],
+  options?: { baseDir?: string; maxBytes?: number },
+): string {
+  return readSafeSessionFileWithMeta(session, requestedFile, roots, options).content;
+}
+
+export function listSessionTraceFiles(
+  session: TraceWorkspaceBinding, roots: readonly string[],
+  { baseDir = WORKSPACE_ROOT, maxFiles = 200, maxDepth = 5 } = {},
+): TraceListResult {
+  if (!Number.isSafeInteger(maxFiles) || maxFiles < 1 || maxFiles > 200
+    || !Number.isSafeInteger(maxDepth) || maxDepth < 0 || maxDepth > 5) {
+    throw new RangeError('Invalid trace listing limits.');
+  }
+  const target = inspectSessionBinding(session, roots, baseDir);
+  const toEntry = (file: typeof target, relativePath: string): TraceFileEntry => ({
+    relativePath, kind: 'file', byteSize: Number(file.metadata.size), modifiedAt: file.metadata.mtime.toISOString(),
+  });
+  if (session.pathType === 'file') {
+    if (!fitsBrowseContract(target.realPath)) throw new PathSandboxError('INVALID_PATH');
+    assertTraceExtension(session.targetPath, target.realPath);
+    return { entries: [toEntry(target, basename(target.realPath))], truncated: false };
+  }
+
+  const visited = new Set<string>();
+  const files = new Map<string, TraceFileEntry>();
+  let truncated = false;
+  const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+  function visit(dir: string, depth: number) {
+    const key = pathKey(dir);
+    if (visited.has(key)) return;
+    visited.add(key);
+    const names = withFsErrors(() => readdirSync(dir, { withFileTypes: true }))
+      .map(({ name }) => name).sort(compare);
+    for (const name of names) {
+      if (name.startsWith('.') || isForbiddenSegment(name)) continue;
+      const input = join(dir, name);
+      try {
+        const child = inspectTracePath(input, [target.realPath], baseDir);
+        enforcePathBoundary(child.realPath, input, input, roots);
+        const segments = relative(target.realPath, child.realPath).split(sep);
+        if (segments.some((segment) => segment.startsWith('.'))) continue;
+        if (child.metadata.isDirectory()) {
+          if (depth < maxDepth) visit(child.realPath, depth + 1);
+          else if (!visited.has(pathKey(child.realPath))) truncated = true;
+        } else if (hasTraceExtension(name) && hasTraceExtension(child.realPath) && fitsBrowseContract(child.realPath)) {
+          const relativePath = segments.join('/');
+          if (files.has(relativePath)) continue;
+          if (files.size >= maxFiles) {
+            truncated = true;
+            return;
+          }
+          files.set(relativePath, toEntry(child, relativePath));
+        }
+      } catch (error) {
+        if (!(error instanceof PathSandboxError)) throw error;
+      }
+      if (files.size >= maxFiles && truncated) return;
+    }
+  }
+  visit(target.realPath, 0);
+  const entries = [...files.values()].sort((a, b) => compare(a.relativePath, b.relativePath));
+  return { entries, truncated };
 }
 
 export function browseSafeDirectory(
