@@ -2,7 +2,9 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { startServer } from '../../apps/server/src/start-server.js';
+import { runCli } from '../cli/index.mjs';
 import { gitIn, inGitFixture, runNode } from './git-fixture.js';
 
 const npm = process.env.npm_execpath;
@@ -150,6 +152,41 @@ describe('M1.5 tools-smoke CLI contract', () => {
     expect(failures[0]?.stderr).toContain('PATH_OUTSIDE_ALLOWED_ROOTS');
     for (const invalid of failures.slice(1)) expect(invalid.stderr).toContain('Usage:');
   }, 12000);
+});
+
+describe('E2E-06 e2e-smoke CLI contract', () => {
+  const smoke = (...flags: string[]) => runNode(['scripts/cli/index.mjs', 'e2e-smoke', ...flags], { env });
+
+  it.concurrent('reports all seven commands in help and rejects unsupported flags', async () => {
+    const [help, invalid] = await Promise.all([
+      smoke('--help'), smoke('--unknown'),
+    ]);
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('env-check|guardrails|smoke|graph|tools-smoke|llm-smoke|e2e-smoke');
+    expect(invalid.status).toBe(1);
+    expect(invalid.stdout).toBe('');
+    expect(invalid.stderr).toContain('Usage:');
+  });
+
+  it('runs twice with stable JSON, fixture bytes and working tree', async () => {
+    const before = repoStatus();
+    const log = 'data/fixtures/diagnostic-demo/noisy-large-xss.log';
+    const bytes = readFileSync(log);
+    const stdout = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) expect(await runCli(['e2e-smoke', '--json'], { startServer })).toBe(0);
+      const reports = stdout.mock.calls.map(([line]) => JSON.parse(String(line)));
+      expect(reports).toHaveLength(2);
+      for (const report of reports) {
+        expect(report).toMatchObject({ ok: true, sessions: 2, completedRounds: 2, stopped: true, retried: true,
+          recovered: true, cascadeCleared: true, originalIntact: true });
+        expect(report.artifactBytes).toBeGreaterThan(6144);
+      }
+      expect(reports[0]).toEqual(reports[1]);
+    } finally { stdout.mockRestore(); }
+    expect(readFileSync(log)).toEqual(bytes);
+    expect(repoStatus()).toBe(before);
+  }, 12_000);
 });
 
 describe('G06-08 graph CLI in a Git repository', () => {

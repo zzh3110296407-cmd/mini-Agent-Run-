@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
-const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph|tools-smoke|llm-smoke> [--path <dir>] [--json|--help]';
+const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph|tools-smoke|llm-smoke|e2e-smoke> [--path <dir>] [--json|--help]';
 const loadGuardrails = () => import('../check-guardrails.mjs');
 
 function envCheck() {
@@ -62,6 +62,12 @@ async function llmSmoke() {
   return runLlmSmoke(root, buildPackages);
 }
 
+async function e2eSmoke(_path, startServer) {
+  if (!startServer) buildPackages();
+  const { runE2eSmoke } = await import('./e2e-smoke.mjs');
+  return runE2eSmoke(root, { startServer });
+}
+
 const commands = new Map([
   ['env-check', envCheck],
   ['guardrails', async () => (await loadGuardrails()).runGuardrails()],
@@ -69,6 +75,7 @@ const commands = new Map([
   ['graph', async () => (await loadGuardrails()).runGraph()],
   ['tools-smoke', toolsSmoke],
   ['llm-smoke', llmSmoke],
+  ['e2e-smoke', e2eSmoke],
 ]);
 
 async function printGraph(result) {
@@ -112,6 +119,9 @@ async function printResult(command, result, json) {
   } else if (command === 'llm-smoke') {
     if (result.ok) console.log('PASS llm-smoke | ' + result.provider + ' | ' + result.model + ' | ' + result.reply);
     else console.error(result.error);
+  } else if (command === 'e2e-smoke') {
+    console.log('PASS e2e-smoke | ' + result.completedRounds + ' completed rounds | ' + result.artifactBytes +
+      ' Artifact bytes | stop, retry, restart and cascade verified');
   } else {
     console.log('PASS GET /api/health HTTP ' + result.statusCode + ' | SQLite ' + result.health.sqlite);
   }
@@ -134,22 +144,23 @@ function parseFlags(command, flags) {
   return { path, format };
 }
 
-const [command, ...flags] = process.argv.slice(2);
-const run = commands.get(command);
-const options = run ? parseFlags(command, flags) : null;
-
-if ((command === '--help' && flags.length === 0) || options?.format === '--help') {
-  console.log(usage);
-} else if (!run || !options) {
-  console.error(usage);
-  process.exitCode = 1;
-} else {
+export async function runCli([command, ...flags], { startServer } = {}) {
+  const run = commands.get(command);
+  const options = run ? parseFlags(command, flags) : null;
+  if ((command === '--help' && flags.length === 0) || options?.format === '--help') {
+    console.log(usage);
+    return 0;
+  }
+  if (!run || !options) {
+    console.error(usage);
+    return 1;
+  }
   const json = options.format === '--json';
 
   try {
-    const result = await run(options.path);
+    const result = await run(options.path, startServer);
     await printResult(command, result, json);
-    if (!result.ok) process.exitCode = 1;
+    return result.ok ? 0 : 1;
   } catch (error) {
     if (json) {
       const failure = JSON.stringify({ ok: false, error: error.message });
@@ -158,6 +169,10 @@ if ((command === '--help' && flags.length === 0) || options?.format === '--help'
     } else {
       console.error(error.message);
     }
-    process.exitCode = 1;
+    return 1;
   }
+}
+
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  process.exitCode = await runCli(process.argv.slice(2));
 }
