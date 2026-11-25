@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { createSqliteRunStore } from './run-repository.js';
 
 const schema = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -115,19 +116,17 @@ export function recoverStaleRuns(db: Database.Database, now = new Date().toISOSt
   const active = db.prepare<[], { id: string; started_at: string | null }>(`
     SELECT id, started_at FROM investigation_runs WHERE status IN ('pending', 'running')
   `);
-  const failRun = db.prepare(`
-    UPDATE investigation_runs
-    SET status = 'failed', stop_reason = 'server_restarted', error_code = 'SERVER_RESTARTED',
-        error_message = 'Run interrupted because the server restarted.', ended_at = ?, duration_ms = ?
-    WHERE id = ?
-  `);
+  const store = createSqliteRunStore(db);
   return db.transaction(() => {
     const runs = active.all();
     const endedAt = Date.parse(now);
     for (const run of runs) {
       const startedAt = run.started_at === null ? Number.NaN : Date.parse(run.started_at);
       const duration = Number.isFinite(startedAt) ? Math.max(0, endedAt - startedAt) : 0;
-      failRun.run(now, duration, run.id);
+      store.finishRun(run.id, now, {
+        type: 'agent_end', status: 'failed', stopReason: 'server_restarted', durationMs: duration,
+        error: { code: 'SERVER_RESTARTED', message: 'Run interrupted because the server restarted.' },
+      });
     }
     return runs.length;
   }).immediate();

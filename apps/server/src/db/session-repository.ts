@@ -12,7 +12,7 @@ const sessionFields = `
 `;
 
 // Allocate activity time within each write so creates and renames follow the latest stored activity.
-const nextActivityTime = `
+export const nextActivityTime = `
   max(@now, coalesce((
     SELECT strftime('%Y-%m-%dT%H:%M:%fZ', max(updated_at), '+0.001 seconds') FROM sessions
   ), @now))
