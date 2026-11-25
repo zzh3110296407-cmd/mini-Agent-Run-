@@ -1,5 +1,5 @@
 ------------------------------- MODULE AgentRun -------------------------------
-EXTENDS FiniteSets
+EXTENDS FiniteSets, Naturals
 
 CONSTANTS Sessions, Runs, NoRun
 ASSUME NoRun \notin Runs
@@ -92,7 +92,8 @@ OneActiveRunPerSession ==
   \A s \in Sessions :
     {r \in ActiveRuns : owner[r] = s} = IF activeLock[s] = NoRun THEN {} ELSE {activeLock[s]}
 \* Once requested, the next effective transition must release the lease or recover the run.
-CancelBoundedConvergence == [](\A r \in pendingStop : status'[r] \in Terminal \/ UNCHANGED vars)
+StopsSettleOnTransition == \A r \in pendingStop : status'[r] \in Terminal
+CancelBoundedConvergence == [][StopsSettleOnTransition]_vars
 PendingStopsSettle == \A r \in Runs : (r \in pendingStop) ~> (r \in runs /\ status[r] \in Terminal)
 NoZombiesAfterRestart == recovered => (ActiveRuns = {} /\ pendingStop = {})
 
