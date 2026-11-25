@@ -1,5 +1,7 @@
 import type { ArtifactStorePort, ToolExecutionContext, TraceWorkspacePort } from '@mini-agent-run/agent';
-import { ArtifactMetaSchema, TextSliceResponseSchema, TraceOverviewSchema, type TextSliceResponse } from '@mini-agent-run/shared';
+import {
+  AgentMessageSchema, ArtifactMetaSchema, TextSliceResponseSchema, TraceOverviewSchema, type TextSliceResponse,
+} from '@mini-agent-run/shared';
 import { analyzeTraceContent, createToolRegistry, sanitizeTraceContent, truncateUtf8Safe } from '@mini-agent-run/tools';
 import fc from 'fast-check';
 import { setImmediate as nextTurn } from 'node:timers/promises';
@@ -137,6 +139,76 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     expect(await overview('trace.log')).toMatchObject({
       format: 'plain_text', anomalies: { firstError: { line: 2 }, slowSpans: [{ durationMs: 2250 }] },
     });
+  });
+
+  it('uses explicit tool success and retains structured and legacy text failures', async () => {
+    const fixtures = [
+      ['success.json', '{"ok":true,"error":null}', false, 0],
+      ['legacy-success.json', '{"ok":true,"error":null}', undefined, 0],
+      ['failure.json', 'The operation could not complete.', true, 1],
+      ['legacy-failure.json', 'ERROR unavailable', undefined, 1],
+      ['structured-failure.json', '{"error":"unavailable"}', undefined, 1],
+    ] as const;
+    const { call } = build(Object.fromEntries(fixtures.map(([file, content, isError]) => [file, JSON.stringify({
+      metadata: { dataset: 'trajerrbench', reward: 1 },
+      messages: [
+        { role: 'assistant', step: 0, content: '[tool_calls]\n- lookup()' },
+        { role: 'tool', step: 1, name: 'lookup', content, isError },
+        { role: 'assistant', step: 2, content: '###STOP###' },
+      ],
+    }, null, 2)])));
+    for (const [file, , , count] of fixtures) {
+      const overview = TraceOverviewSchema.parse((await call('inspect_trace', { file })).data);
+      expect(overview.threeState, file).toEqual({
+        hasToolError: count > 0, toolErrorCount: count, taskOutcome: 'passed', terminationReason: '###STOP###',
+      });
+      if (count === 0) expect(overview.anomalies.firstError, file).toBeNull();
+      else expect(overview.anomalies.firstError, file).toMatchObject({ step: 1 });
+    }
+  });
+
+  it('reports the final stop after an intermediate tool call and preserves an explicit run reason', async () => {
+    const messages = [
+      { id: 'msg_start', role: 'assistant', content: '', createdAt: iso, stopReason: 'tool_calls',
+        toolCalls: [{ id: 'tc_lookup', name: 'lookup', arguments: {} }] },
+      { id: 'msg_result', role: 'toolResult', content: 'done', createdAt: iso, toolCallId: 'tc_lookup',
+        toolName: 'lookup', isError: false, durationMs: 1 },
+      { id: 'msg_final', role: 'assistant', content: 'All done', createdAt: iso, stopReason: 'stop', toolCalls: [] },
+    ].map((message) => AgentMessageSchema.parse(message));
+    const { call } = build({
+      'final.json': JSON.stringify({ messages }),
+      'explicit.json': JSON.stringify({ stopReason: 'server_restarted', messages }),
+      'terminal-event.json': JSON.stringify({ steps: [
+        ...messages, { event: { type: 'agent_end', stopReason: 'max_steps' } },
+      ] }),
+      'in-progress.json': JSON.stringify({ messages: messages.slice(0, 2) }),
+    });
+    for (const [file, reason] of [
+      ['final.json', 'stop'], ['explicit.json', 'server_restarted'],
+      ['terminal-event.json', 'max_steps'], ['in-progress.json', null],
+    ] as const) {
+      expect(TraceOverviewSchema.parse((await call('inspect_trace', { file })).data).threeState.terminationReason)
+        .toBe(reason);
+    }
+  });
+
+  it('points to the effective decoded error field in a nested event', () => {
+    const original = [
+      '{',
+      '  "steps": [{',
+      '    "step": 7,',
+      '    "level": "warn",',
+      '    "metadata": {"level": "error"},',
+      '    "event": {',
+      '      "level": "error",',
+      '      "l\\u0065vel":',
+      '        "error"',
+      '    }',
+      '  }]',
+      '}',
+    ].join('\r\n');
+    const overview = analyzeTraceContent('event.json', original);
+    expect(overview.anomalies.firstError).toEqual({ step: 7, line: 9, snippet: '"error"' });
   });
 
   it('removes escaped and overwritten keys before every reading tool while retaining original positions', async () => {

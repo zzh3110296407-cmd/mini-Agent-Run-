@@ -23,11 +23,13 @@ interface Sanitized {
   };
 }
 
-function scrubDocument(source: string) {
+function scrubDocument(source: string, evidenceField?: string) {
   const parsed: unknown = JSON.parse(source);
   const masks: RecordLocation[] = [];
   const locations: NonNullable<Sanitized['locations']> = {};
   let position = 0;
+  let recordValueStart: number | undefined;
+  let eventValueStart: number | undefined;
 
   function skipSpace() {
     while (position < source.length && ' \t\r\n'.includes(source.charAt(position))) position++;
@@ -42,7 +44,7 @@ function scrubDocument(source: string) {
     }
   }
 
-  function scanValue(visible: boolean, records?: RecordLocation[], root = false) {
+  function scanValue(visible: boolean, records?: RecordLocation[], root = false, event = false) {
     skipSpace();
     const start = position;
     const character = source.charAt(position);
@@ -73,7 +75,13 @@ function scrubDocument(source: string) {
           childRecords = source.charAt(position) === '[' ? [] : undefined;
           locations[key] = childRecords;
         }
-        scanValue(visible && !remove, childRecords);
+        const isEvent = evidenceField !== undefined && root && key === 'event';
+        if (isEvent) eventValueStart = undefined;
+        if (key === evidenceField && visible && !remove) {
+          if (root) recordValueStart = position;
+          if (event) eventValueStart = position;
+        }
+        scanValue(visible && !remove, childRecords, false, isEvent);
         skipSpace();
         if (source.charAt(position) === ',') {
           previousComma = position++;
@@ -107,7 +115,8 @@ function scrubDocument(source: string) {
   // Scan source keys individually because JSON.parse collapses duplicate members.
   if (Array.isArray(parsed)) locations.records = [];
   scanValue(true, locations.records, true);
-  if (masks.length === 0) return { parsed, text: source, stripped: false, locations };
+  const evidenceOffset = eventValueStart ?? recordValueStart;
+  if (masks.length === 0) return { parsed, text: source, stripped: false, locations, evidenceOffset };
   const chunks: string[] = [];
   let previous = 0;
   for (const { start, end } of masks.sort((a, b) => a.start - b.start)) {
@@ -115,7 +124,11 @@ function scrubDocument(source: string) {
     previous = end;
   }
   const text = chunks.join('') + source.slice(previous);
-  return { parsed: JSON.parse(text) as unknown, text, stripped: true, locations };
+  return { parsed: JSON.parse(text) as unknown, text, stripped: true, locations, evidenceOffset };
+}
+
+export function traceFieldValueOffset(sanitizedRecord: string, field: string) {
+  return scrubDocument(sanitizedRecord, field).evidenceOffset;
 }
 
 export function* traceLines(content: string) {

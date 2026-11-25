@@ -1,5 +1,5 @@
 import { TraceOverviewSchema, type LogLevel, type TraceOverview } from '@mini-agent-run/shared';
-import { sanitizeTraceContent, traceLines, type RecordLocation } from './sanitize.js';
+import { sanitizeTraceContent, traceFieldValueOffset, traceLines, type RecordLocation } from './sanitize.js';
 import { ToolError } from './tool-error.js';
 
 type TraceObject = Record<string, unknown>;
@@ -112,20 +112,46 @@ function callName(call: TraceObject | undefined) {
   return firstText(asObject(call?.function), ['name']) ?? firstText(call, ['toolName', 'tool', 'name']);
 }
 
-function isErrorRecord(row: TraceObject, body: string) {
-  const error = row.error;
-  return row.isError === true || row.is_error === true
-    || text(row.level)?.toLowerCase() === 'error'
-    || (error !== undefined && error !== null && error !== false && error !== '')
-    || (row.role === 'tool' && strongError.test(body));
+function isToolMessage(row: TraceObject) {
+  return row.role === 'tool' || row.role === 'toolResult';
 }
 
-function firstEvidence(source: string, span: RecordLocation | undefined, record: TraceRecord, body: string) {
+function recordedError(row: TraceObject) {
+  if (typeof row.isError === 'boolean') return { field: 'isError', failed: row.isError };
+  if (typeof row.is_error === 'boolean') return { field: 'is_error', failed: row.is_error };
+  if (text(row.level)?.toLowerCase() === 'error') return { field: 'level', failed: true };
+  const error = row.error;
+  if (error !== undefined && error !== null && error !== false && error !== '') return { field: 'error', failed: true };
+}
+
+function errorEvidenceField(row: TraceObject, body: string, bodyField: string | undefined) {
+  const structured = recordedError(row);
+  if (structured) return structured.failed ? structured.field : undefined;
+  if (!isToolMessage(row) || bodyField === undefined) return;
+  const first = body.trimStart().charAt(0);
+  if (first === '{' || first === '[') {
+    try {
+      const payload = asObject(JSON.parse(body));
+      return payload && recordedError(payload)?.failed ? bodyField : undefined;
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  return strongError.test(body) ? bodyField : undefined;
+}
+
+function firstEvidence(
+  source: string, span: RecordLocation | undefined, record: TraceRecord, body: string, field: string | undefined,
+) {
   if (span) {
     const block = source.slice(span.start, span.end);
-    for (const { line, text: snippet } of traceLines(block)) {
-      if (structuredError.test(snippet) || /"error"\s*:\s*(?!null\b|false\b|""|$)\S/i.test(snippet)
-        || (body && strongError.test(body) && strongError.test(snippet))) {
+    const offset = field === undefined ? undefined : traceFieldValueOffset(block, field);
+    for (const { line, start, end, text: snippet } of traceLines(block)) {
+      const hasEvidence = offset === undefined
+        ? structuredError.test(snippet) || /"error"\s*:\s*(?!null\b|false\b|""|$)\S/i.test(snippet)
+          || (body && strongError.test(body) && strongError.test(snippet))
+        : offset >= start && offset < end;
+      if (hasEvidence) {
         return { step: record.step, line: record.line + line - 1, snippet: snippet.trim().slice(0, 240) };
       }
     }
@@ -168,7 +194,9 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
   const slowSpans: TraceOverview['anomalies']['slowSpans'] = [];
   let firstError: TraceOverview['anomalies']['firstError'] = null;
   let unmatchedErrors = 0;
-  let terminationReason = reason(root) ?? reason(metadata) ?? null;
+  const declaredRunReason = reason(root) ?? reason(metadata);
+  let runEndReason: string | undefined;
+  let observedReason: string | undefined;
   const reward = metadata?.reward;
   let taskOutcome: Outcome | undefined = reward === 1 ? 'passed' : reward === 0 ? 'failed'
     : findOutcome(metadata, true) ?? findOutcome(root, true);
@@ -177,11 +205,13 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
   for (const { row, span, record } of records) {
     if (!row) continue;
     const { step } = record;
-    const body = firstText(row, ['content', 'text', 'message']) ?? '';
+    const bodyField = ['content', 'text', 'message'].find((key) => text(row[key]) !== undefined);
+    const body = bodyField === undefined ? '' : text(row[bodyField]) ?? '';
     const name = callName(row);
     const id = firstText(row, ['toolCallId', 'tool_call_id', 'callId']);
     const eventType = firstText(row, ['type', 'event_type', 'eventType']);
-    const failed = isErrorRecord(row, body);
+    const evidenceField = errorEvidenceField(row, body, bodyField);
+    const failed = evidenceField !== undefined;
     const explicitResult = /(?:result|execution_end|completed|failed)$/.test(eventType ?? '') || row.role === 'tool';
     const listed = Array.isArray(row.toolCalls) ? row.toolCalls : Array.isArray(row.tool_calls) ? row.tool_calls : [];
     const namedCalls: { name: string; id?: string; failed: boolean }[] = [];
@@ -221,13 +251,20 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
     }
     if (explicitResult && matchingResult) reported.add(matchingResult);
     if (firstError === null && (failed || namedCalls.some((call) => call.failed))) {
-      firstError = firstEvidence(trace.sanitized, span, record, body);
+      firstError = firstEvidence(trace.sanitized, span, record, body, evidenceField);
     }
 
-    terminationReason ??= reason(row) ?? (body.trimEnd().endsWith('###STOP###') ? '###STOP###' : undefined)
-      ?? ([name, ...namedCalls.map((call) => call.name)].includes('transfer_to_human_agents')
-        ? 'transfer_to_human_agents' : null);
     const terminalEvent = /^(?:run_end|agent_end|task_end|outcome|summary)$/.test(eventType ?? '');
+    const rowReason = reason(row);
+    const continuation = /^(?:tool_calls|function_call|tool_use)$/i.test(rowReason?.trim() ?? '');
+    if (rowReason !== undefined && !continuation && (terminalEvent || !isToolMessage(row))) {
+      if (terminalEvent) runEndReason = rowReason;
+      else observedReason = rowReason;
+    } else if (body.trimEnd().endsWith('###STOP###')) {
+      observedReason = '###STOP###';
+    } else if (name === 'transfer_to_human_agents' || namedCalls.some((call) => call.name === 'transfer_to_human_agents')) {
+      observedReason ??= 'transfer_to_human_agents';
+    }
     if (reward !== 0 && reward !== 1) {
       const outcome = findOutcome(row, terminalEvent || (!name && !eventType));
       taskOutcome = outcome ?? taskOutcome;
@@ -245,7 +282,7 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
       unmatchedErrors++;
       firstError ??= { line, snippet: lineText.trim().slice(0, 240) };
     }
-    if (lineText.trimEnd().endsWith('###STOP###')) terminationReason ??= '###STOP###';
+    if (lineText.trimEnd().endsWith('###STOP###')) observedReason = '###STOP###';
     const durationMs = Number(durationPattern.exec(lineText)?.[1]);
     if (Number.isSafeInteger(durationMs) && durationMs >= 1000) slowSpans.push({ durationMs });
   }
@@ -256,7 +293,10 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
     stepCount: format === 'plain_text' ? null : records.length,
     taskSummary: firstText(metadata, ['task_description', 'taskSummary', 'task_summary'])
       ?? firstText(root, ['taskSummary', 'task_summary', 'task_description']) ?? null,
-    threeState: { terminationReason, hasToolError: toolErrorCount > 0, toolErrorCount, taskOutcome: taskOutcome ?? 'unknown' },
+    threeState: {
+      terminationReason: declaredRunReason ?? runEndReason ?? observedReason ?? null,
+      hasToolError: toolErrorCount > 0, toolErrorCount, taskOutcome: taskOutcome ?? 'unknown',
+    },
     anomalies: { firstError, retryLoops: retryLoops(toolCalls), slowSpans },
   });
   return { overview, toolCalls };

@@ -118,6 +118,37 @@ describe('server session trace workspace integration', () => {
     }
   });
 
+  it('locates the multiline JSON error value at the same original line as search and the HTTP slice', async () => {
+    await withFixture(async (temp) => {
+      const file = 'split-level.json';
+      const lines = [
+        '{', '  "metadata": {"annotation":"private test value"},', '  "steps": [', '    {', '      "step": 7,',
+        '      "toolName": "lookup",', '      "level":', '        "error"', '    }', '  ]', '}',
+      ];
+      fs.writeFileSync(join(temp, file), lines.join('\r\n'));
+      const app = buildApp({ allowedTraceRoots: [temp] });
+      try {
+        const session = await bind(app, temp);
+        const run = runner(session, [temp]);
+        const inspection = await run('inspect_trace', { file });
+        const found = await run('search_logs', { file, query: '"error"' });
+        expect(found.data.matches).toMatchObject([{ lineNumber: 8, text: lines[7] }]);
+        const tool = await run('read_file_slice', { file, startLine: 8, limit: 1 });
+        const response = await app.inject('/api/sessions/' + session.id + '/file-slice?' +
+          new URLSearchParams({ file, startLine: '8', limit: '1' }).toString());
+        expect(response.statusCode).toBe(200);
+        const originalLine = TextSliceResponseSchema.parse(response.json()).lines[0];
+        expect(originalLine).toMatchObject({ lineNumber: 8, text: lines[7] });
+        expect(tool.data.lines).toEqual([originalLine]);
+        expect(inspection.content).not.toContain('private test value');
+        expect(TraceOverviewSchema.parse(inspection.data).anomalies.firstError)
+          .toEqual({ step: 7, line: 8, snippet: '"error"' });
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
   it('lists bounded POSIX paths and rejects escapes and forbidden segments through the real sandbox', async () => {
     await withFixture(async (temp) => {
       const a = join(temp, 'a');
