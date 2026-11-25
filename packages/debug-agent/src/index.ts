@@ -10,6 +10,10 @@ export {
 } from './context.js';
 export { buildDebugSystemPrompt, type DebugSystemPromptOptions } from './prompt.js';
 export { extractInvestigationConclusion, type ExtractedInvestigationConclusion } from './conclusion.js';
+export {
+  createDebugAgent, runDebugInvestigation, type DebugInvestigationInput, type DebugInvestigationOptions,
+  type DebugInvestigationResult,
+} from './runner.js';
 
 export interface DebugAgentConfig {
   provider: LLMProvider;
@@ -17,4 +21,10 @@ export interface DebugAgentConfig {
   tools: readonly AgentTool[];
   transformContext?: ContextTransform;
   maxSteps?: number;
+  providerName?: string;
+  systemPrompt?: string;
+  maxInlineToolBytes?: number;
+  contextWindowTokens?: number;
+  compressionTriggerRatio?: number;
+  inputHardCapRatio?: number;
 }

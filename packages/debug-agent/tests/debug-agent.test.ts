@@ -1,13 +1,19 @@
+import type { ArtifactStorePort, SaveArtifactInput, TraceWorkspacePort } from '@mini-agent-run/agent';
+import { createMockLLMProvider, LLMProviderError } from '@mini-agent-run/ai';
 import {
   DEEPSEEK_FLASH_CONTEXT_WINDOW_TOKENS, DEFAULT_COMPRESSION_TRIGGER_RATIO, DEFAULT_INPUT_HARD_CAP_RATIO,
-  buildDebugSystemPrompt, buildSessionHistoryMessages, createDebugContextTransform, estimateMessagesTokens,
-  estimatePromptAndToolsTokens, estimateTokenCount, extractInvestigationConclusion, type PriorSessionRun,
+  buildDebugSystemPrompt, buildSessionHistoryMessages, createDebugAgent, createDebugContextTransform, estimateMessagesTokens,
+  estimatePromptAndToolsTokens, estimateTokenCount, extractInvestigationConclusion, runDebugInvestigation,
+  type DebugAgentConfig, type DebugInvestigationInput, type PriorSessionRun,
 } from '@mini-agent-run/debug-agent';
 import {
-  AgentMessageSchema, InvestigationConclusionSchema, type AgentMessage, type InvestigationConclusion, type ToolCallRequest,
+  AgentEventSchema, AgentMessageSchema, AgentStateSchema, ArtifactMetaSchema, InvestigationConclusionSchema,
+  MAX_INLINE_TOOL_OUTPUT_BYTES, type AgentEvent, type AgentMessage, type ArtifactMeta, type InvestigationConclusion,
+  type ToolCallRequest,
 } from '@mini-agent-run/shared';
+import { classifyTraceLine, createToolRegistry } from '@mini-agent-run/tools';
 import fc from 'fast-check';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const at = '2026-11-25T00:00:00.000Z';
 const later = '2026-11-25T00:00:01.000Z';
@@ -268,5 +274,198 @@ describe('[F05_MULTI_TURN_INVESTIGATION] debug prompt and tolerant conclusion ex
         expect(cleanedAnswer).toBe(raw);
       }
     }), { seed: 220207, numRuns: 100 });
+  });
+});
+
+function sliceContent(content: string, { offsetLine, limit, level, q }: Parameters<TraceWorkspacePort['sliceText']>[1]) {
+  const lines = content ? content.replace(/\r?\n$/, '').split(/\r?\n/) : [];
+  const matches = lines.map((text, index) => ({ lineNumber: index + 1, level: classifyTraceLine(text), text }))
+    .filter((line) => (level === undefined || line.level === level) && (q === undefined || line.text.includes(q)));
+  const eligible = matches.filter(({ lineNumber }) => lineNumber >= offsetLine);
+  const nextOffsetLine = eligible[limit]?.lineNumber ?? null;
+  return {
+    totalLines: lines.length, matchedLines: matches.length, offsetLine, limit,
+    hasMore: nextOffsetLine !== null, nextOffsetLine, lines: eligible.slice(0, limit),
+  };
+}
+
+function debugFixture() {
+  const targetPath = 'D:\\private\\case-data';
+  const file = 'trace.log';
+  const content = Array.from({ length: 64 }, (_, index) => 'INFO Request ' + index + ' ' + 'diagnostic detail '.repeat(10))
+    .join('\n') + '\nERROR root cause: missing lookup argument';
+  const workspace: TraceWorkspacePort = {
+    binding: { targetPath, pathType: 'dir' },
+    resolveTarget: () => ({ realPath: targetPath, kind: 'dir' }),
+    listFiles: () => ({ entries: [{ relativePath: file, kind: 'file', byteSize: Buffer.byteLength(content), modifiedAt: at }],
+      truncated: false }),
+    readFile(relativePath) {
+      if (relativePath !== file) throw Object.assign(new Error('No fixture for this file.'), { code: 'PATH_NOT_FOUND' });
+      return { relativePath, byteSize: Buffer.byteLength(content), content };
+    },
+    sliceText: sliceContent,
+  };
+  const artifacts = new Map<string, { content: string; metadata: ArtifactMeta }>();
+  const save = vi.fn(({ content: original, ...input }: SaveArtifactInput) => {
+    const metadata = ArtifactMetaSchema.parse({
+      ...input, id: 'art_memory_' + artifacts.size, byteSize: Buffer.byteLength(original),
+      lineCount: input.summary.lineCount, createdAt: at,
+    });
+    artifacts.set(metadata.id, { content: original, metadata });
+    return metadata;
+  });
+  const readSlice = vi.fn<ArtifactStorePort['readSlice']>((id, { query, ...page }) => {
+    const stored = artifacts.get(id);
+    return stored ? sliceContent(stored.content, { ...page, q: query }) : null;
+  });
+  const artifactStore: ArtifactStorePort = { save, readSlice, getMeta: (id) => artifacts.get(id)?.metadata ?? null };
+  const tools = createToolRegistry({ workspace, artifactStore, toolMode: 'mock' });
+  const input: DebugInvestigationInput = {
+    runId: 'run_debug_first', sessionId: 'ses_debug', prompt: 'Why did the run fail?',
+    targetPath, pathType: 'dir', targetLabel: 'diagnostic run', allowedRoots: [targetPath],
+    toolMode: 'mock', artifactStore, signal: new AbortController().signal,
+  };
+  return { tools, save, readSlice, input };
+}
+
+describe('[F05_MULTI_TURN_INVESTIGATION] offline debug investigations', () => {
+  it('runs real tools, offloads a large search result, reads the Artifact and answers with a structured conclusion', async () => {
+    const { tools, save, readSlice, input } = debugFixture();
+    const artifactId = 'art_memory_0';
+    const rawAnswer = 'The lookup had a missing argument.\n\n' + conclusionFence({
+      ...exampleConclusion, evidence: [{ kind: 'artifact_line', label: 'Recovered log matches', artifactId, startLine: 1 }],
+    });
+    const provider = createMockLLMProvider({ turns: [
+      { toolCalls: [call('list', 'list_files'), call('inspect', 'inspect_trace', { file: 'trace.log' })] },
+      { toolCalls: [call('search', 'search_logs', { file: 'trace.log', query: 'INFO' })] },
+      { toolCalls: [call('read', 'read_artifact_slice', { artifactId, startLine: 1, limit: 1 })] },
+      { text: rawAnswer, chunkSize: 80 },
+      { text: 'Follow-up answer.' },
+    ] });
+    const events: AgentEvent[] = [];
+    const config: DebugAgentConfig = { provider, tools, model: 'deepseek-flash', providerName: 'fixture-gateway' };
+    const agent = createDebugAgent(config);
+    expect(agent.config).toBe(config);
+    const result = await agent.investigate({ ...input, onEvent: async (value) => {
+      await Promise.resolve();
+      events.push(AgentEventSchema.parse(value));
+    } });
+    expect(result).toMatchObject({
+      state: { status: 'completed', step: 4, pendingToolCalls: [], model: { modelId: 'deepseek-flash', provider: 'fixture-gateway' } },
+      finalAnswer: 'The lookup had a missing argument.',
+      conclusion: { evidence: [{ kind: 'artifact_line', artifactId, startLine: 1 }] },
+    });
+    expect(AgentStateSchema.safeParse(result.state).success).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: 'agent_end', finalAnswer: result.finalAnswer, conclusion: result.conclusion });
+    expect(result.state.messages.at(-1)?.content).toBe(rawAnswer);
+    expect(provider.recordedRequests[0]?.tools?.map(({ name }) => name)).toEqual(tools.map(({ name }) => name));
+    expect(provider.recordedRequests[0]?.tools).toHaveLength(7);
+    expect(provider.recordedRequests[0]?.messages[0]?.content).toContain('diagnostic run');
+    expect(provider.recordedRequests[0]?.messages[0]?.content).not.toContain(input.targetPath);
+    expect(save).toHaveBeenCalledOnce();
+    const stored = save.mock.calls[0]?.[0];
+    expect(stored).toMatchObject({ sourceTool: 'search_logs', toolCallId: 'tc_search', runId: input.runId, sessionId: input.sessionId });
+    expect(Buffer.byteLength(stored?.content ?? '')).toBeGreaterThan(MAX_INLINE_TOOL_OUTPUT_BYTES);
+    expect(JSON.parse(stored?.content ?? '')).toMatchObject({ totalMatches: 64, matches: expect.any(Array) });
+    const summary = provider.recordedRequests[2]?.messages.find((message) => message.role === 'tool' && message.toolCallId === 'tc_search');
+    expect(Buffer.byteLength(summary?.content ?? '')).toBeLessThanOrEqual(MAX_INLINE_TOOL_OUTPUT_BYTES);
+    expect(JSON.parse(summary?.content ?? '')).toMatchObject({ artifactId, truncatedForLlm: true });
+    expect(readSlice).toHaveBeenCalledExactlyOnceWith(artifactId, { offsetLine: 1, limit: 1, level: undefined, query: undefined });
+    const reread = provider.recordedRequests[3]?.messages.find((message) => message.role === 'tool' && message.toolCallId === 'tc_read');
+    expect(Buffer.byteLength(reread?.content ?? '')).toBeLessThanOrEqual(MAX_INLINE_TOOL_OUTPUT_BYTES);
+    const readback = JSON.parse(reread?.content ?? '');
+    expect(readback).toMatchObject({ lineTruncated: true, lines: [{ lineNumber: 1 }] });
+    expect(readback.lines[0].text).toContain('INFO Request 0');
+    expect(stored?.content.startsWith(readback.lines[0].text)).toBe(true);
+
+    const followUp = await agent.investigate({
+      ...input, runId: 'run_debug_next', prompt: 'How can it be prevented?',
+      priorRuns: [
+        prior('failed', 'failed', { prompt: 'failed-history-only' }),
+        prior('foreign', 'completed', { sessionId: 'ses_other', prompt: 'foreign-history-only' }),
+        prior('debug_first', 'completed', { sessionId: input.sessionId, prompt: input.prompt,
+          finalAnswer: result.finalAnswer, conclusion: result.conclusion }),
+      ],
+    });
+    expect(followUp).toMatchObject({ finalAnswer: 'Follow-up answer.', conclusion: null });
+    expect(provider.recordedRequests[4]?.messages.slice(1)).toEqual([
+      { role: 'user', content: input.prompt }, { role: 'assistant', content: result.finalAnswer },
+      { role: 'user', content: 'How can it be prevented?' },
+    ]);
+  });
+
+  it('applies a custom context transform before the hard cap and counts system and tool overhead', async () => {
+    const fixture = debugFixture();
+    const tools = fixture.tools.slice(0, 1);
+    const systemPrompt = '保留事实'.repeat(15);
+    const provider = createMockLLMProvider({ turns: [{ text: 'Answer' }] });
+    const transformContext = vi.fn(async (messages: readonly AgentMessage[]) =>
+      messages.map((message) => ({ ...message, content: '中'.repeat(1400) })));
+    const result = await runDebugInvestigation({
+      ...fixture.input, tools, model: 'mock-model', provider, systemPrompt, transformContext, contextWindowTokens: 1000,
+    });
+    const projected = provider.recordedRequests[0]?.messages;
+    expect(projected?.[0]).toEqual({ role: 'system', content: systemPrompt });
+    const content = projected?.[1]?.content ?? '';
+    const remaining = 700 - estimatePromptAndToolsTokens(systemPrompt, tools) - 4;
+    expect(remaining).toBeGreaterThan(0);
+    expect(content).toBe('中'.repeat(remaining));
+    expect(result.state.messages[0]?.content).toBe(fixture.input.prompt);
+    expect(transformContext).toHaveBeenCalledOnce();
+  });
+
+  it('aborts in-flight diagnostics and emits a stopped terminal event with no conclusion', async () => {
+    const { tools, input, save } = debugFixture();
+    const controller = new AbortController();
+    const events: AgentEvent[] = [];
+    const provider = createMockLLMProvider({ turns: [{
+      toolCalls: [call('slow', 'check_runtime_diagnostics', { scenario: 'slow', delayMs: 20, progressIntervalMs: 5 })],
+    }] });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await runDebugInvestigation({
+        ...input, provider, model: 'mock-model', tools, signal: controller.signal,
+        onEvent(event) {
+          events.push(event);
+          if (event.type === 'tool_execution_start') timer = setTimeout(() => controller.abort(), 5);
+        },
+      });
+      expect(result).toMatchObject({
+        conclusion: null, finalAnswer: null, state: { status: 'stopped', stopReason: 'user_abort', pendingToolCalls: [] },
+      });
+      expect(events.at(-2)).toMatchObject({ type: 'tool_execution_end', toolCallId: 'tc_slow', isError: true });
+      expect(events.at(-1)).toMatchObject({ type: 'agent_end', status: 'stopped', stopReason: 'user_abort' });
+      expect(events.at(-1)).not.toHaveProperty('conclusion');
+      expect(provider.recordedRequests).toHaveLength(1);
+      expect(save).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  it('keeps conclusions unset for model errors and for answers from runs stopped by the step budget', async () => {
+    const fixture = debugFixture();
+    const events: AgentEvent[] = [];
+    const raw = conclusionFence();
+    const stopping = createMockLLMProvider({ turns: [{ text: raw, toolCalls: [call('list', 'list_files')] }] });
+    const error = createMockLLMProvider({ turns: [{ error: new LLMProviderError('LLM_AUTH_ERROR', 'Denied') }] });
+    const base = { ...fixture.input, tools: fixture.tools, model: 'mock-model', maxSteps: 1,
+      onEvent: (event: AgentEvent) => { events.push(event); } };
+    const stopped = await runDebugInvestigation({ ...base, provider: stopping });
+    expect(stopped).toMatchObject({ conclusion: null, finalAnswer: raw, state: { status: 'stopped', stopReason: 'max_steps' } });
+    expect(events.at(-1)).toMatchObject({ type: 'agent_end', finalAnswer: raw });
+    expect(events.at(-1)).not.toHaveProperty('conclusion');
+    const failed = await runDebugInvestigation({ ...base, provider: error });
+    expect(failed).toMatchObject({ conclusion: null, finalAnswer: null, state: { status: 'failed', stopReason: 'error' } });
+    expect(events.at(-1)).not.toHaveProperty('conclusion');
+  });
+
+  it('validates the configured artifact budget via the existing offload wrapper', async () => {
+    const fixture = debugFixture();
+    const provider = createMockLLMProvider({ turns: [{ text: 'Unused' }] });
+    await expect(runDebugInvestigation({
+      ...fixture.input, tools: fixture.tools, provider, model: 'mock-model', maxInlineToolBytes: 6145,
+    })).rejects.toThrow(RangeError);
+    expect(provider.recordedRequests).toEqual([]);
   });
 });
