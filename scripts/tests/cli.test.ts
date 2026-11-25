@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { gitIn, inGitFixture } from './git-fixture.js';
+import { gitIn, inGitFixture, runNode } from './git-fixture.js';
 
 const npm = process.env.npm_execpath;
 if (!npm) throw new Error('Run the CLI contract tests through npm.');
@@ -10,14 +10,8 @@ if (!npm) throw new Error('Run the CLI contract tests through npm.');
 const env = Object.fromEntries(Object.entries(process.env)
   .filter(([name]) => name.toLowerCase() !== 'npm_config_loglevel'));
 
-function invoke(command: string, flags: string[] = [], cwd?: string) {
-  return spawnSync(process.execPath, [npm, 'run', 'cli', '--', command, ...flags], {
-    cwd,
-    encoding: 'utf8',
-    env,
-    windowsHide: true,
-  });
-}
+const invoke = (command: string, flags: string[] = [], cwd?: string) =>
+  runNode([npm, 'run', 'cli', '--', command, ...flags], { cwd, env });
 
 function repoStatus() {
   const status = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
@@ -26,12 +20,12 @@ function repoStatus() {
 }
 
 describe('M0-06 npm CLI contract', () => {
-  it.each(['env-check', 'guardrails', 'smoke', 'graph'])(
+  it.concurrent.each(['env-check', 'guardrails', 'smoke', 'graph'])(
     'emits parseable stdout on both npm invocations of %s',
-    (command) => {
+    async (command) => {
       const before = repoStatus();
-      const outputs = Array.from({ length: 2 }, () => {
-        const result = invoke(command, ['--json']);
+      async function parsedOutput() {
+        const result = await invoke(command, ['--json']);
         expect(result.error).toBeUndefined();
         expect(result.status, result.stderr).toBe(0);
         const output = JSON.parse(result.stdout);
@@ -49,30 +43,32 @@ describe('M0-06 npm CLI contract', () => {
           });
         }
         return output;
-      });
-      expect(outputs[0]).toEqual(outputs[1]);
+      }
+      const first = await parsedOutput();
+      const second = await parsedOutput();
+      expect(first).toEqual(second);
       expect(repoStatus()).toBe(before);
     },
     12000,
   );
 
-  it('reports usage on stderr with a nonzero exit for an unknown command', () => {
-    const result = invoke('unknown-cmd');
+  it.concurrent('reports usage on stderr with a nonzero exit for an unknown command', async () => {
+    const result = await invoke('unknown-cmd');
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
     expect(result.stdout).toBe('');
     expect(result.stderr).toContain('Usage:');
   });
 
-  it('lists the graph command in help', () => {
-    const result = invoke('--help');
+  it.concurrent('lists the graph command in help', async () => {
+    const result = await invoke('--help');
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('env-check|guardrails|smoke|graph');
   });
 });
 
 describe('G06-08 graph CLI in a Git repository', () => {
-  it('reports valid, missing, and cyclic graphs with parseable JSON', () => inGitFixture((cwd) => {
+  it.concurrent('reports valid, missing, and cyclic graphs with parseable JSON', () => inGitFixture(async (cwd) => {
     const first = ['F01', 'DEMO'].join('_');
     const second = ['F02', 'DEMO'].join('_');
     const target = 'scripts/tests/demo.test.ts';
@@ -93,15 +89,15 @@ describe('G06-08 graph CLI in a Git repository', () => {
     writeFileSync(graphFile, JSON.stringify(graph));
     writeFileSync(testFile, 'it("[' + first + ']", () => {});');
 
-    function checkGraph(expectedExit: number) {
-      const response = invoke('graph', ['--json'], cwd);
+    async function checkGraph(expectedExit: number) {
+      const response = await invoke('graph', ['--json'], cwd);
       expect(response.error).toBeUndefined();
       expect(response.status, response.stderr).toBe(expectedExit);
       expect(response.stderr).toBe('');
       return JSON.parse(response.stdout);
     }
 
-    expect(checkGraph(0)).toMatchObject({
+    expect(await checkGraph(0)).toMatchObject({
       ok: true, present: true, skipped: false, activeMilestone: 'M1',
       milestones: ['M0', 'M1', 'M2'],
       summary: { total: 2, required: 1, covered: 1, missing: 0, deferred: 1 },
@@ -112,20 +108,20 @@ describe('G06-08 graph CLI in a Git repository', () => {
       edges: graph.edges,
       violations: [],
     });
-    const human = invoke('graph', [], cwd);
+    const human = await invoke('graph', [], cwd);
     expect(human.status).toBe(0);
     expect(human.stdout).toContain('[COVERED] ' + first);
     expect(human.stdout).toContain('[DEFERRED] ' + second);
 
     gitIn(cwd, 'add', '--', graphPath);
-    expect(checkGraph(1)).toMatchObject({
+    expect(await checkGraph(1)).toMatchObject({
       ok: false,
       violations: [expect.objectContaining({ rule: 'G-06', snapshot: 'index' })],
     });
     gitIn(cwd, 'add', '--', target);
 
     writeFileSync(testFile, '// ' + first);
-    expect(checkGraph(1)).toMatchObject({
+    expect(await checkGraph(1)).toMatchObject({
       ok: false, present: true, summary: { missing: 1 },
       violations: [expect.objectContaining({ rule: 'G-06', message: expect.stringContaining(first) })],
     });
@@ -135,7 +131,7 @@ describe('G06-08 graph CLI in a Git repository', () => {
       activeMilestone: 'M0',
       edges: [...graph.edges, { from: second, to: first }],
     }));
-    expect(checkGraph(1)).toMatchObject({
+    expect(await checkGraph(1)).toMatchObject({
       ok: false, present: true,
       violations: [expect.objectContaining({ rule: 'G-06', message: expect.stringContaining('Cycle') })],
     });

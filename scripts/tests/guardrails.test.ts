@@ -1,6 +1,6 @@
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, posix, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ESLint } from 'eslint';
 import fc from 'fast-check';
@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { ENV_KEYS } from '../../apps/server/src/config/env.js';
 import { inspectFeatureGraph, scanGuardrails } from '../lib/guardrails.mjs';
 import { workspaceDependencies, workspaceDirectory, workspaceName } from '../lib/workspace-dag.mjs';
-import { envExample, envSchema, gitIn, guardrailEntry, inGitFixture } from './git-fixture.js';
+import { envExample, envSchema, gitIn, guardrailEntry, inGitFixture, runNode } from './git-fixture.js';
 
 const lint = new ESLint();
 
@@ -225,11 +225,22 @@ function projectPath(base: string, target: string) {
   return posix.relative('/repo', posix.resolve('/repo', base, target.replaceAll('\\', '/')));
 }
 
+function localDependencyPath(base: string, spec: string) {
+  const normalized = spec.replaceAll('\\', '/');
+  const prefixed = /^(?:file|link):(.+)/i.exec(normalized)?.[1];
+  if (!prefixed && !isAbsolute(normalized) && !/^(?:\.\.?|~)(?:\/|$)/.test(normalized)) return;
+
+  const path = (prefixed ?? normalized).replace(/^\/{1,3}(?=\.\.?(?:\/|$))/, '');
+  if (path.startsWith('~/')) return resolve(homedir(), path.slice(2));
+  return resolve(base, sep === '\\' ? path.replace(/^\/+([a-z]:\/)/i, '$1') : path);
+}
+
 function dependencyWorkspace(base: string, name: string, version: string) {
   const alias = /^npm:(@mini-agent-run\/[^@]+)/.exec(version)?.[1];
-  const local = /^(?:file|link):(.+)/.exec(version)?.[1];
+  const local = localDependencyPath(base, version);
   if (local) {
-    const target = workspaceDirectory(projectPath(base, local));
+    const normalized = relative(process.cwd(), local).split(sep).join('/');
+    const target = workspaceDirectory(sep === '\\' ? normalized.toLowerCase() : normalized);
     if (target) return workspaceName(target);
   }
   const packageName = alias ?? name;
@@ -285,6 +296,20 @@ describe('M1.1 workspace manifest and project-reference DAG', () => {
     expect(forbiddenManifestDependencies('packages/shared', manifest, []))
       .toEqual(['dependencies:@mini-agent-run/tools', 'dependencies:@mini-agent-run/agent']);
     expect(references('packages/ai', { references: [{ path: '../tools' }] })).not.toEqual(['packages/shared']);
+  });
+
+  it.each([
+    ['file:../web', ['devDependencies:@mini-agent-run/web']],
+    ['../web', ['devDependencies:@mini-agent-run/web']],
+    ['./../web', ['devDependencies:@mini-agent-run/web']],
+    [resolve('apps/web'), ['devDependencies:@mini-agent-run/web']],
+    ['file:../../packages/shared', []],
+    ['../../packages/shared', []],
+  ])('checks the server local directory dependency %s by its workspace target', (version, violations) => {
+    const server = 'apps/server';
+    const manifest = { name: workspaceName(server), devDependencies: { 'review-local': version } };
+    expect(forbiddenManifestDependencies(server, manifest, workspaceDependencies[server].map(workspaceName)))
+      .toEqual(violations);
   });
 });
 const file = 'apps/server/src/probe.ts';
@@ -469,19 +494,15 @@ describe('M0 repository guardrails', () => {
   });
 });
 
-function checkIn(cwd: string) {
-  const result = spawnSync(process.execPath, [guardrailEntry, '--json'], {
-    cwd,
-    encoding: 'utf8',
-    windowsHide: true,
-  });
+async function checkIn(cwd: string) {
+  const result = await runNode([guardrailEntry, '--json'], { cwd });
   expect(result.error).toBeUndefined();
   expect(result.stderr).toBe('');
   return { status: result.status, stdout: result.stdout, body: JSON.parse(result.stdout) };
 }
 
-describe('M0 Git snapshot guardrails', () => {
-  it('G-04a scans project npm configuration and redacts both snapshots', () => inGitFixture((cwd) => {
+describe.concurrent('M0 Git snapshot guardrails', () => {
+  it('G-04a scans project npm configuration and redacts both snapshots', () => inGitFixture(async (cwd) => {
     const credential = ['sk', 'Synthetic'.repeat(4)].join('-');
     const npmrc = join(cwd, '.npmrc');
     const typescript = join(cwd, 'scripts', 'credential-probe.ts');
@@ -489,7 +510,7 @@ describe('M0 Git snapshot guardrails', () => {
     const config = '//packages.invalid/:_authToken=' + credential + '\n';
 
     writeFileSync(typescript, 'export const key = ' + JSON.stringify(credential));
-    const source = checkIn(cwd);
+    const source = await checkIn(cwd);
     expect(source.status).toBe(1);
     expect(source.body.violations).toEqual([
       expect.objectContaining({ rule: 'G-04a', file: 'scripts/credential-probe.ts', line: 1 }),
@@ -499,7 +520,7 @@ describe('M0 Git snapshot guardrails', () => {
 
     writeFileSync(npmrc, config);
     gitIn(cwd, 'add', '--', '.npmrc');
-    const tracked = checkIn(cwd);
+    const tracked = await checkIn(cwd);
     expect(tracked.status).toBe(1);
     expect(tracked.body.violations).toEqual([
       expect.objectContaining({ rule: 'G-04a', file: '.npmrc', line: 1 }),
@@ -507,7 +528,7 @@ describe('M0 Git snapshot guardrails', () => {
     expect(tracked.stdout).not.toContain(credential);
 
     writeFileSync(npmrc, safe);
-    const indexOnly = checkIn(cwd);
+    const indexOnly = await checkIn(cwd);
     expect(indexOnly.status).toBe(1);
     expect(indexOnly.body.violations).toEqual([
       expect.objectContaining({ rule: 'G-04a', file: '.npmrc', line: 1, snapshot: 'index' }),
@@ -515,10 +536,10 @@ describe('M0 Git snapshot guardrails', () => {
     expect(indexOnly.stdout).not.toContain(credential);
 
     gitIn(cwd, 'add', '--', '.npmrc');
-    expect(checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, violations: [] } });
+    expect(await checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, violations: [] } });
   }), 12000);
 
-  it('G-04c pairs the template and schema within each Git snapshot', () => inGitFixture((cwd) => {
+  it('G-04c pairs the template and schema within each Git snapshot', () => inGitFixture(async (cwd) => {
     const exampleFile = join(cwd, envExample);
     const schemaFile = join(cwd, envSchema);
     const initialTemplate = readFileSync(exampleFile, 'utf8');
@@ -528,7 +549,7 @@ describe('M0 Git snapshot guardrails', () => {
     writeFileSync(exampleFile, changedTemplate);
     gitIn(cwd, 'add', '--', envExample);
     writeFileSync(exampleFile, initialTemplate);
-    const indexDrift = checkIn(cwd);
+    const indexDrift = await checkIn(cwd);
     expect(indexDrift.status).toBe(1);
     expect(indexDrift.body.violations).toEqual([
       expect.objectContaining({ rule: 'G-04c', file: envExample, snapshot: 'index' }),
@@ -536,7 +557,7 @@ describe('M0 Git snapshot guardrails', () => {
 
     gitIn(cwd, 'add', '--', envExample);
     writeFileSync(exampleFile, changedTemplate);
-    const worktreeDrift = checkIn(cwd);
+    const worktreeDrift = await checkIn(cwd);
     expect(worktreeDrift.status).toBe(1);
     expect(worktreeDrift.body.violations).toEqual([
       expect.objectContaining({ rule: 'G-04c', file: envExample }),
@@ -547,7 +568,7 @@ describe('M0 Git snapshot guardrails', () => {
     gitIn(cwd, 'add', '--', envExample, envSchema);
     writeFileSync(exampleFile, initialTemplate);
     writeFileSync(schemaFile, initialSchema);
-    const matched = checkIn(cwd);
+    const matched = await checkIn(cwd);
     expect(matched.status, matched.stdout).toBe(0);
     expect(matched.body).toMatchObject({ ok: true, violations: [] });
   }), 12000);
@@ -738,8 +759,8 @@ describe('G-06 staged Feature Graph', () => {
   });
 });
 
-describe('G-06 Git snapshots', () => {
-  it('matches only files and graph contents in each snapshot', () => inGitFixture((cwd) => {
+describe.concurrent('G-06 Git snapshots', () => {
+  it('matches only files and graph contents in each snapshot', () => inGitFixture(async (cwd) => {
     const graph = stagedGraph('M1');
     const graphFile = join(cwd, graphPath);
     const test = join(cwd, testFile);
@@ -749,20 +770,20 @@ describe('G-06 Git snapshots', () => {
     writeFileSync(graphFile, JSON.stringify(graph));
     writeFileSync(test, testTitle(first));
     gitIn(cwd, 'add', '--', graphPath);
-    const unstagedTest = checkIn(cwd);
+    const unstagedTest = await checkIn(cwd);
     expect(unstagedTest.status).toBe(1);
     expect(unstagedTest.body.violations).toEqual([
       expect.objectContaining({ rule: 'G-06', snapshot: 'index', message: expect.stringContaining(first) }),
     ]);
 
     gitIn(cwd, 'add', '--', testFile);
-    expect(checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, skipped: [] } });
+    expect(await checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, skipped: [] } });
 
     const cycle = [...graph.edges, { from: second, to: first, relation: 'depends_on' }];
     writeFileSync(graphFile, JSON.stringify({ ...graph, edges: cycle }));
     gitIn(cwd, 'add', '--', graphPath);
     writeFileSync(graphFile, JSON.stringify(graph));
-    const indexCycle = checkIn(cwd);
+    const indexCycle = await checkIn(cwd);
     expect(indexCycle.status).toBe(1);
     expect(indexCycle.body.violations).toEqual([
       expect.objectContaining({ rule: 'G-06', snapshot: 'index', message: expect.stringContaining('Cycle') }),
@@ -770,16 +791,16 @@ describe('G-06 Git snapshots', () => {
 
     gitIn(cwd, 'add', '--', graphPath);
     writeFileSync(test, '// ' + first);
-    const worktreeMissing = checkIn(cwd);
+    const worktreeMissing = await checkIn(cwd);
     expect(worktreeMissing.status).toBe(1);
     expect(worktreeMissing.body.violations).toEqual([
       { rule: 'G-06', file: graphPath, line: 1, message: 'No test references feature ID ' + first + '.' },
     ]);
     unlinkSync(test);
-    expect(checkIn(cwd).body.violations).toEqual(worktreeMissing.body.violations);
+    expect((await checkIn(cwd)).body.violations).toEqual(worktreeMissing.body.violations);
 
     writeFileSync(test, testTitle(first));
     unlinkSync(graphFile);
-    expect(checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, skipped: [] } });
+    expect(await checkIn(cwd)).toMatchObject({ status: 0, body: { ok: true, skipped: [] } });
   }), 12000);
 });
