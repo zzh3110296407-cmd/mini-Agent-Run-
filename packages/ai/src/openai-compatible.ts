@@ -214,9 +214,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
     try {
       let body: string;
       try {
+        // DeepSeek thinking mode requires replaying reasoning content along with tool history.
+        const deepSeekFlashTools = tools?.length && new URL(this.#endpoint).origin === 'https://api.deepseek.com'
+          && (model === 'deepseek-flash' || model === 'deepseek-v4-flash');
         body = JSON.stringify({
           model, messages: messages.map(toWireMessage),
           ...(tools?.length ? { tools: tools.map((tool) => ({ type: 'function', function: tool })) } : {}),
+          ...(deepSeekFlashTools ? { thinking: { type: 'disabled' } } : {}),
           stream: true,
         });
       } catch {

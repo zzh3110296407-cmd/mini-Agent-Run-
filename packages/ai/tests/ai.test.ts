@@ -126,6 +126,44 @@ describe('[F05_MULTI_TURN_INVESTIGATION] OpenAI-compatible model gateway', () =>
     });
   });
 
+  it('F12_E2E_VERIFICATION_SUITE resumes a DeepSeek Flash tool call without reasoning content', async () => {
+    const flash = { ...request, model: 'deepseek-flash', tools: [
+      { name: call.name, description: 'Inspect trace', parameters: { type: 'object' } },
+    ] };
+    const sent: unknown[] = [];
+    const provider = createOpenAICompatibleProvider({ baseUrl: 'https://api.deepseek.com', apiKey,
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body));
+        sent.push(body.thinking);
+        if (body.messages.some(({ role }: { role: string }) => role === 'tool')) {
+          if (body.thinking?.type !== 'disabled') {
+            return new Response('reasoning_content is required for tool history in thinking mode', { status: 400 });
+          }
+          return new Response(event({ content: 'Trace inspected.' }, 'stop') + done);
+        }
+        const delta = { tool_calls: [{ index: 0, id: call.id,
+          function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] };
+        return new Response(event(delta, 'tool_calls') + done);
+      },
+    });
+    const first = await collect(provider.stream(flash));
+    const tool = first.find((chunk) => chunk.type === 'toolcall_complete')?.toolCall;
+    expect(tool).toEqual(call);
+    if (!tool) throw new Error('Missing initial tool call.');
+    await expect(collect(provider.stream({ ...flash, messages: [...flash.messages,
+      { role: 'assistant', content: '', toolCalls: [tool] },
+      { role: 'tool', toolCallId: tool.id, name: tool.name, content: 'Synthetic trace evidence' },
+    ] }))).resolves.toEqual([
+      { type: 'text_delta', delta: 'Trace inspected.' }, { type: 'done', stopReason: 'stop' },
+    ]);
+    expect(sent).toEqual([{ type: 'disabled' }, { type: 'disabled' }]);
+
+    const otherFetch = vi.fn<typeof fetch>(async () => new Response(event({ content: 'OK' }, 'stop') + done));
+    const compatible = createOpenAICompatibleProvider({ baseUrl, apiKey, fetchImpl: otherFetch });
+    await collect(compatible.stream(flash));
+    expect(JSON.parse(String(otherFetch.mock.calls[0]?.[1]?.body))).not.toHaveProperty('thinking');
+  });
+
   it('keeps an emitted ID stable when the upstream ID arrives late and uses early known IDs', async () => {
     const text = event({ tool_calls: [{ index: 0, function: { name: 'inspect' } }, { index: 1, id: 'tc_known' }] })
       + event({ tool_calls: [{ index: 0, id: 'tc_late', function: { arguments: '{}' } },
