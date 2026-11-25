@@ -88,6 +88,13 @@ function foldedContent(message: ToolResult): string {
   return `[Folded earlier tool result from ${tool} (${status})${pointer}]`;
 }
 
+function containsArtifactId(content: string, artifactId: string): boolean {
+  for (const match of content.matchAll(/(?:^|[^A-Za-z0-9_-])(art_[A-Za-z0-9_-]+)/g)) {
+    if (match[1] === artifactId) return true;
+  }
+  return false;
+}
+
 function truncateToTokens(text: string, limit: number): string {
   let ascii = 0;
   let nonAscii = 0;
@@ -163,10 +170,17 @@ export function createDebugContextTransform({
       for (; foldedThrough < end; foldedThrough++) {
         const message = current[foldedThrough];
         if (message?.role !== 'toolResult') continue;
-        const content = foldedContent(message);
-        const saving = estimateTokenCount(message.content) - estimateTokenCount(content);
-        if (saving <= 0) continue;
-        total -= saving;
+        const originalTokens = estimateTokenCount(message.content);
+        let content = foldedContent(message);
+        let tokens = estimateTokenCount(content);
+        if (tokens >= originalTokens) {
+          const { artifactId } = message;
+          if (!artifactId || containsArtifactId(message.content, artifactId)) continue;
+          // The model projection only sees the tool result body.
+          content = `artifactId=${artifactId}`;
+          tokens = estimateTokenCount(content);
+        }
+        total += tokens - originalTokens;
         current[foldedThrough] = { ...message, content };
       }
     }

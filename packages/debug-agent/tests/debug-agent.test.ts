@@ -1,4 +1,4 @@
-import type { ArtifactStorePort, SaveArtifactInput, TraceWorkspacePort } from '@mini-agent-run/agent';
+import type { AgentTool, ArtifactStorePort, SaveArtifactInput, TraceWorkspacePort } from '@mini-agent-run/agent';
 import { createMockLLMProvider, LLMProviderError } from '@mini-agent-run/ai';
 import {
   DEEPSEEK_FLASH_CONTEXT_WINDOW_TOKENS, DEFAULT_COMPRESSION_TRIGGER_RATIO, DEFAULT_INPUT_HARD_CAP_RATIO,
@@ -11,7 +11,7 @@ import {
   MAX_INLINE_TOOL_OUTPUT_BYTES, type AgentEvent, type AgentMessage, type ArtifactMeta, type InvestigationConclusion,
   type ToolCallRequest,
 } from '@mini-agent-run/shared';
-import { classifyTraceLine, createToolRegistry } from '@mini-agent-run/tools';
+import { classifyTraceLine, createToolRegistry, summarizeToolOutput } from '@mini-agent-run/tools';
 import fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -191,6 +191,19 @@ describe('[F05_MULTI_TURN_INVESTIGATION] session history and protocol-safe conte
     expect(output).toEqual(witness);
     expect(fixedOverheadTokens + estimateMessagesTokens(output)).toBe(420);
     expect(input[0]?.content).toBe('排查原因。');
+    assertToolPairing(output);
+  });
+
+  it('retains the exact Artifact ID when folding a short result with a longer lookalike in its body', async () => {
+    const artifactId = 'art_trace_3-';
+    const [toolCall, result] = toolTurn('pointer', ['OK ' + artifactId + 'extra']);
+    if (!toolCall || result?.role !== 'toolResult') throw new Error('Expected a complete tool turn.');
+    const input = [user('artifact_question', '中'.repeat(160)), toolCall, { ...result, artifactId }];
+    const output = await createDebugContextTransform({
+      contextWindowTokens: 250, keepRecentToolTurns: 0,
+    })(input);
+    expect(output[2]).toMatchObject({ artifactId, content: 'artifactId=' + artifactId });
+    expect(estimateMessagesTokens(output)).toBeLessThanOrEqual(175);
     assertToolPairing(output);
   });
 
@@ -403,6 +416,63 @@ describe('[F05_MULTI_TURN_INVESTIGATION] offline debug investigations', () => {
       { role: 'assistant', content: '', toolCalls: [lookup] },
       { role: 'tool', content: 'OK', name: lookup.name, toolCallId: lookup.id },
     ]);
+  });
+
+  it.each([false, true])('reads evidence from a short Artifact result after compression (ID already in body: %s)', async (bodyIncludesId) => {
+    const { tools, save, readSlice, input } = debugFixture();
+    const reader = tools.find(({ name }) => name === 'read_artifact_slice');
+    if (!reader) throw new Error('Expected the real Artifact reader.');
+    const evidence = 'First line of preserved evidence.';
+    const capture: AgentTool = {
+      name: 'capture_log', description: 'Save a trace excerpt.', parameters: { type: 'object' },
+      async execute(_args, context) {
+        if (!context.toolCallId) throw new Error('Expected a tool call ID.');
+        const { id } = await context.artifactStore.save({
+          runId: context.runId, sessionId: context.sessionId, toolCallId: context.toolCallId,
+          sourceTool: 'capture_log', title: 'Excerpt', contentType: 'text/plain',
+          content: evidence, summary: summarizeToolOutput(evidence),
+        });
+        return { artifactId: id, content: bodyIncludesId ? 'OK ' + id : 'OK', isError: false };
+      },
+    };
+    const captureCall = call('capture', capture.name);
+    const provider = createMockLLMProvider({ turns: (request, index) => {
+      if (index === 0) return { toolCalls: [captureCall] };
+      if (index === 1) {
+        const wire = request.messages.find((message) => message.role === 'tool' && message.toolCallId === captureCall.id);
+        const artifactId = /\bart_[A-Za-z0-9_-]+/.exec(wire?.content ?? '')?.[0];
+        if (!artifactId) return { text: 'Missing Artifact ID.' };
+        return { toolCalls: [call('read', reader.name, { artifactId, startLine: 1, limit: 1 })] };
+      }
+      return { text: 'Read finished.' };
+    } });
+    const systemPrompt = 'Inspect the trace.';
+    const prompt = '定位问题。'.repeat(84);
+    const available = [capture, reader];
+    const overhead = estimatePromptAndToolsTokens(systemPrompt, available);
+    const firstRequestTokens = overhead + estimateMessagesTokens([user('start', prompt)]);
+    const contextWindowTokens = Math.ceil((firstRequestTokens + 7) / DEFAULT_INPUT_HARD_CAP_RATIO);
+    const hardCap = Math.floor(contextWindowTokens * DEFAULT_INPUT_HARD_CAP_RATIO);
+    const result = await runDebugInvestigation({
+      ...input, prompt, systemPrompt, tools: available, provider, model: 'fixture', contextWindowTokens,
+    });
+    expect(result.state.status).toBe('completed');
+    expect(result.finalAnswer).toBe('Read finished.');
+    expect(overhead + estimateMessagesTokens(result.state.messages.slice(0, 3))).toBeGreaterThan(hardCap);
+    expect(result.state.messages[2]?.content).toBe(bodyIncludesId ? 'OK art_memory_0' : 'OK');
+    const compressed = provider.recordedRequests[1]?.messages;
+    expect(compressed?.[2]).toMatchObject({ role: 'assistant', toolCalls: [captureCall] });
+    expect(compressed?.[3]).toEqual({
+      role: 'tool', name: capture.name, toolCallId: captureCall.id,
+      content: bodyIncludesId ? 'OK art_memory_0' : 'artifactId=art_memory_0',
+    });
+    const projectedCost = compressed?.slice(1).reduce((sum, message) => sum + 4 + estimateTokenCount(message.content)
+      + (message.role === 'assistant' && message.toolCalls?.length ? estimateTokenCount(JSON.stringify(message.toolCalls)) : 0), overhead);
+    expect(projectedCost).toBeLessThanOrEqual(hardCap);
+    expect(save).toHaveBeenCalledOnce();
+    expect(readSlice).toHaveBeenCalledExactlyOnceWith('art_memory_0', { offsetLine: 1, limit: 1, level: undefined, query: undefined });
+    const readback = result.state.messages.find((message) => message.role === 'toolResult' && message.toolCallId === 'tc_read');
+    expect(JSON.parse(readback?.content ?? '')).toMatchObject({ lines: [{ lineNumber: 1, text: evidence }] });
   });
 
   it('runs real tools, offloads a large search result, reads the Artifact and answers with a structured conclusion', async () => {
