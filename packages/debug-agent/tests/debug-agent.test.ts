@@ -1,9 +1,11 @@
 import {
   DEEPSEEK_FLASH_CONTEXT_WINDOW_TOKENS, DEFAULT_COMPRESSION_TRIGGER_RATIO, DEFAULT_INPUT_HARD_CAP_RATIO,
-  buildSessionHistoryMessages, createDebugContextTransform, estimateMessagesTokens, estimatePromptAndToolsTokens,
-  estimateTokenCount, type PriorSessionRun,
+  buildDebugSystemPrompt, buildSessionHistoryMessages, createDebugContextTransform, estimateMessagesTokens,
+  estimatePromptAndToolsTokens, estimateTokenCount, extractInvestigationConclusion, type PriorSessionRun,
 } from '@mini-agent-run/debug-agent';
-import { AgentMessageSchema, type AgentMessage, type ToolCallRequest } from '@mini-agent-run/shared';
+import {
+  AgentMessageSchema, InvestigationConclusionSchema, type AgentMessage, type InvestigationConclusion, type ToolCallRequest,
+} from '@mini-agent-run/shared';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
@@ -17,6 +19,23 @@ const assistant = (name: string, content = '', toolCalls: ToolCallRequest[] = []
 const call = (name: string, toolName = 'inspect_trace', args: Record<string, unknown> = {}): ToolCallRequest =>
   ({ id: 'tc_' + name, name: toolName, arguments: args });
 const fixtureSummary = { summary: 'Conclusion fallback', evidence: [], recommendations: [] };
+
+const exampleConclusion: InvestigationConclusion = {
+  summary: 'The lookup failed before the final answer.',
+  rootCauseStep: 2,
+  rootCauseCategory: 'lookup',
+  threeStateAssessment: { terminationReason: 'stop', hasToolError: true, taskOutcome: 'failed' },
+  evidence: [
+    { kind: 'file_step', label: 'Tool failed', file: 'trace.jsonl', step: 2 },
+    { kind: 'file_line', label: 'Lookup failure', file: 'trace.log', startLine: 8, endLine: 9 },
+    { kind: 'artifact_line', label: 'Search output', artifactId: 'art_demo', startLine: 1 },
+  ],
+  recommendations: ['Check the lookup inputs.'],
+};
+const backticks = String.fromCharCode(96).repeat(3);
+const fence = (content: string, label = 'investigation-conclusion', marker = backticks, newline = '\n') =>
+  [marker + label, content, marker].join(newline);
+const conclusionFence = (conclusion: InvestigationConclusion = exampleConclusion) => fence(JSON.stringify(conclusion));
 
 function toolTurn(tag: string, contents: readonly string[], assistantText = ''): AgentMessage[] {
   const calls = contents.map((_, index) => call(tag + '_' + index));
@@ -164,5 +183,90 @@ describe('[F05_MULTI_TURN_INVESTIGATION] session history and protocol-safe conte
         assertToolPairing(transformed);
       },
     ), { seed: 220205, numRuns: 100 });
+  });
+});
+
+describe('[F05_MULTI_TURN_INVESTIGATION] debug prompt and tolerant conclusion extraction', () => {
+  it('guides progressive evidence and three independent signals with safe target metadata', () => {
+    const prompt = buildDebugSystemPrompt({ pathType: 'file', targetLabel: '演示 session.log', extraInstructions: 'Keep the answer concise.' });
+    for (const name of ['list_files', 'inspect_trace', 'search_logs', 'read_file_slice', 'compare_files', 'read_artifact_slice',
+      'terminationReason', 'hasToolError', 'taskOutcome', 'investigation-conclusion', 'file_step', 'file_line', 'artifact_line',
+      'rootCauseStep', 'rootCauseCategory', 'threeStateAssessment', 'evidence', 'recommendations']) {
+      expect(prompt).toContain(name);
+    }
+    expect(prompt).toContain('three independent signals');
+    expect(prompt).toContain('演示 session.log');
+    expect(prompt).toContain('target kind is file');
+    expect(prompt).toContain('Keep the answer concise.');
+    const privatePaths = ['D:\\User\\Private\\input.log', '/home/private/input.log', '\\\\internal\\evidence'];
+    for (const path of privatePaths) {
+      expect(buildDebugSystemPrompt({ pathType: 'dir', targetLabel: path, extraInstructions: 'Read from ' + path }))
+        .toBe(buildDebugSystemPrompt({ pathType: 'dir' }));
+    }
+    const privateToken = ['sk', 'fixture-0123456789'].join('-');
+    expect(buildDebugSystemPrompt({ targetLabel: privateToken, extraInstructions: 'Authorization: Bearer ' + privateToken }))
+      .toBe(buildDebugSystemPrompt());
+  });
+
+  it('extracts all evidence types from a case-insensitive tilde fence and cleans only that block', () => {
+    const selected = fence(JSON.stringify(exampleConclusion), '  INVESTIGATION-CONCLUSION  ', '~~~', '\r\n');
+    const example = fence('{"foo":1}', 'json', backticks, '\r\n');
+    const raw = ['Human answer', '', selected, '', '', '', example, 'Tail'].join('\r\n');
+    expect(extractInvestigationConclusion(raw)).toEqual({
+      conclusion: exampleConclusion, cleanedAnswer: ['Human answer', '', example, 'Tail'].join('\r\n'),
+    });
+  });
+
+  it('chooses the last valid dedicated block and uses its summary for a block-only answer', () => {
+    const earlier = conclusionFence({ ...exampleConclusion, summary: 'Earlier summary' });
+    const selected = conclusionFence();
+    const malformed = fence('{broken');
+    expect(extractInvestigationConclusion([earlier, selected, malformed].join('\n\n'))).toEqual({
+      conclusion: exampleConclusion, cleanedAnswer: [earlier, malformed].join('\n\n'),
+    });
+    expect(extractInvestigationConclusion(selected)).toEqual({ conclusion: exampleConclusion, cleanedAnswer: exampleConclusion.summary });
+  });
+
+  it('uses the last JSON fence as a fallback only when it passes the conclusion schema', () => {
+    const valid = fence(JSON.stringify(exampleConclusion), 'json');
+    const invalid = fence('{"foo":1}', 'JSON');
+    const badDedicated = fence('{bad');
+    expect(extractInvestigationConclusion([badDedicated, invalid, valid].join('\n'))).toEqual({
+      conclusion: exampleConclusion, cleanedAnswer: [badDedicated, invalid].join('\n'),
+    });
+    const earlierValid = valid + '\n' + invalid;
+    expect(extractInvestigationConclusion(earlierValid)).toEqual({ conclusion: null, cleanedAnswer: earlierValid });
+  });
+
+  it('keeps malformed, incomplete, non-conclusion and nested fences unchanged', () => {
+    const invalidEvidence = { ...exampleConclusion, evidence: [{ kind: 'file_line', label: 'Wrong order',
+      file: 'trace.log', startLine: 10, endLine: 9 }] };
+    for (const answer of [
+      '  plain answer \r\n',
+      fence('{"foo": 1}', 'json'),
+      fence('{not JSON'),
+      fence(JSON.stringify(invalidEvidence)),
+      backticks + 'investigation-conclusion\n{"summary":"missing',
+      fence(conclusionFence(), 'text', '~~~~'),
+      fence(JSON.stringify(exampleConclusion), 'investigation-conclusion') + '~',
+    ]) {
+      expect(extractInvestigationConclusion(answer)).toEqual({ conclusion: null, cleanedAnswer: answer });
+    }
+  });
+
+  it('handles 100 seeded mixtures of random text, JSON, and complete or partial fences', () => {
+    const snippet = fc.oneof(fc.string({ maxLength: 30 }), fc.json(), fc.constantFrom(
+      backticks, '~~~JSON', backticks + 'investigation-conclusion\n{', conclusionFence(), '<missing end>',
+    ));
+    fc.assert(fc.property(fc.array(snippet, { maxLength: 10 }), (parts) => {
+      const raw = parts.join('\n');
+      const { conclusion, cleanedAnswer } = extractInvestigationConclusion(raw);
+      if (conclusion) {
+        expect(InvestigationConclusionSchema.safeParse(conclusion).success).toBe(true);
+        expect(cleanedAnswer.trim()).not.toBe('');
+      } else {
+        expect(cleanedAnswer).toBe(raw);
+      }
+    }), { seed: 220207, numRuns: 100 });
   });
 });

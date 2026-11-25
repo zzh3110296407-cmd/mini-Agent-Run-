@@ -8,6 +8,8 @@ export {
   estimateTokenCount, estimateMessagesTokens, estimatePromptAndToolsTokens,
   buildSessionHistoryMessages, createDebugContextTransform, type PriorSessionRun, type DebugContextOptions,
 } from './context.js';
+export { buildDebugSystemPrompt, type DebugSystemPromptOptions } from './prompt.js';
+export { extractInvestigationConclusion, type ExtractedInvestigationConclusion } from './conclusion.js';
 
 export interface DebugAgentConfig {
   provider: LLMProvider;
