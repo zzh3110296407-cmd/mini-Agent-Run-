@@ -1,5 +1,12 @@
 import type { ToolCallRequest } from '@mini-agent-run/shared';
 
+export { LLMProviderError, redactSecret, type LLMErrorCode } from './errors.js';
+export { createOpenAICompatibleProvider, OpenAICompatibleProvider, resolveChatCompletionsUrl,
+  type OpenAICompatibleProviderOptions } from './openai-compatible.js';
+export { createMockLLMProvider, MockLLMProvider, type MockLLMProviderOptions, type MockLLMTurn } from './mock-provider.js';
+export { normalizeToolCallId } from './tool-call-id.js';
+export { parseSseByteStream } from './sse.js';
+
 export const AI_PACKAGE_NAME = '@mini-agent-run/ai';
 
 export interface LLMToolDefinition {
