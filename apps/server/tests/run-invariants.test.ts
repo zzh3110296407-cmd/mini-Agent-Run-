@@ -1,5 +1,5 @@
 import type { LLMProvider } from '@mini-agent-run/ai';
-import type { InvestigationRun } from '@mini-agent-run/shared';
+import { RunEventEnvelopeSchema, type InvestigationRun } from '@mini-agent-run/shared';
 import fc from 'fast-check';
 import assert from 'node:assert/strict';
 import { setImmediate as nextTurn } from 'node:timers/promises';
@@ -31,7 +31,6 @@ const provider: LLMProvider = {
 const lateEnd = { type: 'agent_end', status: 'completed', stopReason: 'completed', durationMs: 0 } as const;
 
 type StoredRun = Pick<InvestigationRun, 'id' | 'status'> & { session_id: string; last_seq: number };
-type StoredEvent = { run_id: string; seq: number; event_type: string; payload_type: string };
 
 describe('F06_RUN_STOP_AND_INVARIANTS SQLite and runtime state machine', () => {
   it('preserves four AgentRun.tla properties over generated start/stop/retry/recovery interleavings', async () => {
@@ -47,37 +46,35 @@ describe('F06_RUN_STOP_AND_INVARIANTS SQLite and runtime state machine', () => {
         createSession(db, { targetPath, pathType: 'dir' }).id);
       const terminals = new Map<string, StoredRun>();
       const readRuns = db.prepare<[], StoredRun>('SELECT * FROM investigation_runs ORDER BY created_at, rowid');
-      const readEvents = db.prepare<[], StoredEvent>(`
-        SELECT run_id, seq, event_type, json_extract(payload_json, '$.type') AS payload_type
-        FROM run_events ORDER BY run_id, seq
-      `);
+      const mismatchedEventTypes = db.prepare<[], number>(`
+        SELECT count(*) FROM run_events WHERE event_type IS NOT json_extract(payload_json, '$.type')
+      `).pluck();
       const activeCount = db.prepare<[], number>(`
         SELECT count(*) FROM investigation_runs WHERE status IN ('pending', 'running')
       `).pluck();
 
       function assertState() {
-        // Check the same persisted rows after every operation with two bulk reads.
-        const events = new Map<string, { count: number; endSeq: number | null }>();
-        for (const { run_id: runId, seq, event_type: type, payload_type: payloadType } of readEvents.all()) {
-          assert.equal(payloadType, type, 'Stored event type must match its payload');
-          const stats = events.get(runId) ?? { count: 0, endSeq: null };
-          assert.equal(seq, ++stats.count, 'Run event sequences must be contiguous');
-          if (type === 'agent_end') {
-            assert.equal(stats.endSeq, null, 'A run must have at most one agent_end');
-            stats.endSeq = seq;
-          }
-          events.set(runId, stats);
-        }
+        assert.equal(mismatchedEventTypes.get(), 0, 'Stored event type must match its payload');
         const activeSessions = new Set<string>();
         for (const run of readRuns.all()) {
-          const stats = events.get(run.id);
-          assert.equal(run.last_seq, stats?.count ?? 0);
+          const events = store.listRunEvents(run.id);
+          assert.equal(run.last_seq, events.length);
+          let endSeq: number | null = null;
+          for (const [index, envelope] of events.entries()) {
+            const { seq, runId, event } = RunEventEnvelopeSchema.parse(envelope);
+            assert.equal(runId, run.id);
+            assert.equal(seq, index + 1, 'Run event sequences must be contiguous in repository order');
+            if (event.type === 'agent_end') {
+              assert.equal(endSeq, null, 'A run must have at most one agent_end');
+              endSeq = seq;
+            }
+          }
           if (isActiveRun(run.status)) {
             assert.ok(!activeSessions.has(run.session_id), 'OneActiveRunPerSession');
             activeSessions.add(run.session_id);
-            assert.equal(stats?.endSeq ?? null, null, 'An active run cannot have agent_end');
+            assert.equal(endSeq, null, 'An active run cannot have agent_end');
           } else {
-            assert.equal(stats?.endSeq, run.last_seq, 'A terminal run must end with agent_end');
+            assert.equal(endSeq, run.last_seq, 'A terminal run must end with agent_end');
             const previous = terminals.get(run.id);
             if (previous) assert.deepStrictEqual(run, previous, 'TerminalIrreversible');
             else terminals.set(run.id, run);
