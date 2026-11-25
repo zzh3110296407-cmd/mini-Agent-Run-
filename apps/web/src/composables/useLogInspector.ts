@@ -14,6 +14,8 @@ type Source =
   | { mode: 'file'; sessionId: SessionId; file?: string }
   | { mode: 'artifact'; sessionId: SessionId; artifactId: ArtifactId };
 type InspectorClient = Pick<typeof apiClient, 'browseFs' | 'getSessionFileSlice' | 'getArtifactSlice'>;
+type BodyPage = { offset: number; matchesBefore: number };
+type PageNavigation = { previous: BodyPage[]; matchesBefore: number; selectLast?: boolean };
 
 const supportedFile = /\.(jsonl?|log|txt)$/iu;
 const pageSize = MAX_ARTIFACT_SLICE_LINES;
@@ -28,6 +30,17 @@ function orderedLines(previous: LogLine[], incoming: LogLine[]) {
   const byLine = new Map(previous.map((row) => [row.lineNumber, row]));
   for (const row of incoming) byLine.set(row.lineNumber, row);
   return [...byLine.values()].sort((first, second) => first.lineNumber - second.lineNumber);
+}
+
+function findListedFile(directory: string, entries: readonly FsBrowseEntry[], file: string) {
+  const windows = /^(?:[a-z]:[\\/]|\\\\)/iu.test(directory);
+  const key = (value: string) => windows ? value.replaceAll('\\', '/').toLowerCase() : value;
+  const requested = key(file);
+  const relative = requested.replace(/^(?:\.\/)+/u, '');
+  const directChild = !relative.includes('/') && !/^[a-z]:/iu.test(relative);
+  const root = key(directory).replace(/\/+$/u, '');
+  return entries.find(({ path, name }) => key(path) === requested
+    || (directChild && (key(path) === root + '/' + relative || key(name) === relative)));
 }
 
 function sliceIssue(error: unknown, fallback: string) {
@@ -59,7 +72,6 @@ export function useLogInspector({
   const error = ref('');
   const levelFilter = ref<LogLevelFilter>('all');
   const searchQuery = ref('');
-  const activeMatchIndex = ref(-1);
   const viewMode = ref<LogViewMode>('raw');
   const evidenceTarget = shallowRef<InspectorTargetRequest | null>(null);
   const focusRange = shallowRef<LineRange | null>(null);
@@ -72,10 +84,15 @@ export function useLogInspector({
   const errorHasMore = computed(() => errorNextOffsetLine.value !== null);
   const errorLoading = ref(false);
   const errorFetchError = ref('');
-  const bodyStart = ref(1);
-  const previousOffsets = ref<number[]>([]);
+  const displayedPages = shallowRef<BodyPage[]>([]);
+  const previousPages = shallowRef<BodyPage[]>([]);
+  const bodyStart = computed(() => displayedPages.value[0]?.offset ?? 1);
+  const matchesBeforeWindow = computed(() => displayedPages.value[0]?.matchesBefore ?? 0);
+  const matchInWindow = computed(() => loadedLines.value.findIndex((row) => row.lineNumber === selectedLine.value));
+  const activeMatchIndex = computed(() => searchQuery.value && matchInWindow.value >= 0
+    ? matchesBeforeWindow.value + matchInWindow.value : -1);
   const nextBodyOffset = computed(() => nextOffset(slice.value));
-  const canGoPrevious = computed(() => previousOffsets.value.length > 0 || bodyStart.value > 1);
+  const canGoPrevious = computed(() => previousPages.value.length > 0 || bodyStart.value > 1);
   let filesReady = false;
   let filesToken = 0;
   let sliceToken = 0;
@@ -108,7 +125,6 @@ export function useLogInspector({
 
   function selectLine(line: number) {
     selectedLine.value = line;
-    activeMatchIndex.value = searchQuery.value ? loadedLines.value.findIndex((row) => row.lineNumber === line) : -1;
     scrollRequest.value++;
   }
 
@@ -129,8 +145,8 @@ export function useLogInspector({
     }
   }
 
-  type PageRequest = { append?: boolean; line?: number; step?: number };
-  async function loadBody(offset: number, { append = false, line, step }: PageRequest = {}) {
+  type PageRequest = { append?: boolean; line?: number; step?: number; navigation?: PageNavigation };
+  async function loadBody(offset: number, { append = false, line, step, navigation }: PageRequest = {}) {
     const current = source();
     if (!current) return false;
     const requestOffset = offset;
@@ -144,7 +160,6 @@ export function useLogInspector({
     if (!append) {
       loadedLines.value = [];
       slice.value = null;
-      activeMatchIndex.value = -1;
       selectedLine.value = null;
       scrollRequest.value++;
     }
@@ -164,15 +179,23 @@ export function useLogInspector({
       if (!accept()) return false;
       activeArtifactMeta.value = result.artifact;
       slice.value = result.slice;
-      if (!append) bodyStart.value = result.slice.offsetLine;
-      loadedLines.value = orderedLines(append ? loadedLines.value : [], result.slice.lines);
-      const first = target ?? (query && !append ? loadedLines.value[0]?.lineNumber : undefined);
-      if (first !== undefined && loadedLines.value.some(({ lineNumber }) => lineNumber === first)) selectLine(first);
+      const previousLines = append ? loadedLines.value : [];
+      // Slice offsets are physical line numbers. Count accepted matches to determine the global ordinal.
+      const page = {
+        offset: result.slice.offsetLine,
+        matchesBefore: append ? matchesBeforeWindow.value + previousLines.length : navigation?.matchesBefore ?? 0,
+      };
+      displayedPages.value = append ? [...displayedPages.value, page] : [page];
+      if (navigation) previousPages.value = navigation.previous;
+      loadedLines.value = orderedLines(previousLines, result.slice.lines);
+      const match = query && !append ? loadedLines.value.at(navigation?.selectLast ? -1 : 0) : undefined;
+      const selected = target ?? match?.lineNumber;
+      if (selected !== undefined && loadedLines.value.some(({ lineNumber }) => lineNumber === selected)) selectLine(selected);
       return true;
     } catch (issue) {
       if (accept()) {
         error.value = sliceIssue(issue, '无法读取日志切片，请重试。');
-        bodyRetry = () => loadBody(requestOffset, { append, line, step });
+        bodyRetry = () => loadBody(requestOffset, { append, line, step, navigation });
       }
       return false;
     } finally {
@@ -225,9 +248,8 @@ export function useLogInspector({
     errorNextOffsetLine.value = null;
     errorFetchError.value = '';
     selectedLine.value = null;
-    activeMatchIndex.value = -1;
-    previousOffsets.value = [];
-    bodyStart.value = 1;
+    previousPages.value = [];
+    displayedPages.value = [];
     scrollRequest.value++;
   }
 
@@ -235,6 +257,13 @@ export function useLogInspector({
     selectedFilePath.value = path;
     if (path === null) remembered.delete(id);
     else remembered.set(id, path);
+  }
+
+  function selectEvidenceFile(current: Session, file: string) {
+    const listed = findListedFile(current.targetPath, fileOptions.value, file);
+    if (listed) rememberFile(current.id, listed.path);
+    // Keep off-list evidence usable without replacing the remembered directory selection.
+    else selectedFilePath.value = file;
   }
 
   function loadSource() {
@@ -261,7 +290,12 @@ export function useLogInspector({
       fileOptions.value = options;
       filesReady = true;
       const evidenceFile = evidenceTarget.value?.mode === 'file' ? evidenceTarget.value.file : undefined;
-      if (evidenceFile && selectedFilePath.value === evidenceFile) return;
+      if (evidenceFile) {
+        const previous = selectedFilePath.value;
+        selectEvidenceFile(current, evidenceFile);
+        if (selectedFilePath.value !== previous) activateSource();
+        return;
+      }
       const path = options.find(({ path }) => path === selectedFilePath.value)?.path ?? options[0]?.path ?? null;
       fileListLoading.value = false;
       rememberFile(current.id, path);
@@ -340,7 +374,7 @@ export function useLogInspector({
     };
     stepNotice.value = target.mode === 'file' && target.line === undefined && target.step !== undefined
       ? 'Step #' + target.step : null;
-    if (target.mode === 'file' && current.pathType === 'dir' && target.file) rememberFile(current.id, target.file);
+    if (target.mode === 'file' && current.pathType === 'dir' && target.file) selectEvidenceFile(current, target.file);
     if (open.value) activateSource();
   }
 
@@ -370,7 +404,7 @@ export function useLogInspector({
     if (visible && !searchQuery.value) { selectLine(line); return; }
     searchQuery.value = '';
     levelFilter.value = 'all';
-    previousOffsets.value = [];
+    previousPages.value = [];
     await loadBody(contextStart(line), { line });
   }
 
@@ -378,30 +412,37 @@ export function useLogInspector({
     const normalized = query.trim();
     if (searchQuery.value === normalized) return;
     searchQuery.value = normalized;
-    previousOffsets.value = [];
+    previousPages.value = [];
     void loadBody(1);
   }
 
   function changeLevel(level: LogLevelFilter) {
     if (levelFilter.value === level) return;
     levelFilter.value = level;
-    previousOffsets.value = [];
+    previousPages.value = [];
     void loadBody(1);
   }
 
   function nextPage() {
     const offset = nextBodyOffset.value;
     if (offset === null || loading.value || loadingMore.value) return;
-    previousOffsets.value = [...previousOffsets.value, bodyStart.value];
-    void loadBody(offset);
+    const searching = searchQuery.value !== '';
+    const current = searching ? displayedPages.value : displayedPages.value.slice(0, 1);
+    return loadBody(offset, { navigation: {
+      previous: [...previousPages.value, ...current],
+      matchesBefore: searching ? matchesBeforeWindow.value + loadedLines.value.length : 0,
+    } });
   }
 
-  function previousPage() {
+  function goPrevious(selectLast = false) {
     if (!canGoPrevious.value || loading.value || loadingMore.value) return;
-    const offset = previousOffsets.value.at(-1) ?? Math.max(1, bodyStart.value - pageSize);
-    previousOffsets.value = previousOffsets.value.slice(0, -1);
-    void loadBody(offset);
+    const page = previousPages.value.at(-1) ?? { offset: Math.max(1, bodyStart.value - pageSize), matchesBefore: 0 };
+    return loadBody(page.offset, { navigation: {
+      previous: previousPages.value.slice(0, -1), matchesBefore: page.matchesBefore, selectLast,
+    } });
   }
+
+  function previousPage() { return goPrevious(); }
 
   function loadMore() {
     const offset = nextBodyOffset.value;
@@ -413,10 +454,11 @@ export function useLogInspector({
     const count = loadedLines.value.length;
     if (!searchQuery.value || !count || loading.value || loadingMore.value) return;
     viewMode.value = 'raw';
-    const index = activeMatchIndex.value < 0 ? (delta === 1 ? 0 : count - 1) : activeMatchIndex.value + delta;
-    if (delta === 1 && index >= count && nextBodyOffset.value !== null && !await loadMore()) return;
-    const size = loadedLines.value.length;
-    const match = size ? loadedLines.value[(index + size) % size] : undefined;
+    const index = matchInWindow.value < 0 ? (delta === 1 ? 0 : count - 1) : matchInWindow.value + delta;
+    if (index < 0 && previousPages.value.length) { await goPrevious(true); return; }
+    if (index >= count && nextBodyOffset.value !== null) { await nextPage(); return; }
+    const allMatchesLoaded = previousPages.value.length === 0 && nextBodyOffset.value === null;
+    const match = loadedLines.value[allMatchesLoaded ? (index + count) % count : index];
     if (match) selectLine(match.lineNumber);
   }
 

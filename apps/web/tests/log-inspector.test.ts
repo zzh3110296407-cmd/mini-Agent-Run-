@@ -167,6 +167,46 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     expect(ui.line(1).text()).toContain('chosen source');
   });
 
+  it('W3-02 相对路径证据保留目录选择，切回后正文与错误索引仍读原文件', async () => {
+    const logName = 'noisy-large-xss.log';
+    const logPath = session.targetPath + '/' + logName;
+    const log = large(140, { 115: 'ERROR evidence from selected log' });
+    const api = mockLogs({
+      dirs: { [session.targetPath]: [listing[0]!, { kind: 'file', name: logName, path: logPath }] },
+      files: { [logPath]: log, [logName]: log },
+    });
+    const ui = await inspectorFor(session);
+    const pickerSelection = async () => {
+      await click(ui.wrapper, 'log-file-choose');
+      const selected = ui.wrapper.findAll(test('log-file-option') + '[aria-pressed="true"]')
+        .map((option) => option.attributes('data-file-path'));
+      await click(ui.wrapper, 'log-file-choose');
+      return selected;
+    };
+    await click(ui.wrapper, 'log-file-choose');
+    await ui.wrapper.get(test('log-file-option') + '[data-file-path="' + logPath + '"]').trigger('click');
+    await flushPromises();
+    ui.inspector.openTarget({ mode: 'file', sessionId: session.id, file: logName, line: 115, label: '相对路径证据' });
+    await flushPromises();
+    expect(ui.line(115).attributes('data-highlighted')).toBe('true');
+    const duringEvidence = await pickerSelection();
+
+    ui.sessionRef.value = single;
+    await flushPromises();
+    const beforeReturn = api.calls.length;
+    ui.sessionRef.value = session;
+    await flushPromises();
+    const afterReturn = await pickerSelection();
+    const reads = api.calls.slice(beforeReturn)
+      .filter((url) => same(url, fileRoute(session)))
+      .map((url) => [url.searchParams.get('file'), url.searchParams.get('level')]);
+    expect({ duringEvidence, afterReturn, reads }).toEqual({
+      duringEvidence: [logPath], afterReturn: [logPath], reads: [[logPath, null], [logPath, 'error']],
+    });
+    expect(ui.line(1).get(test('log-line-text')).text()).toBe(log[0]?.text);
+    expect(ui.errorAt(115).text()).toContain('evidence from selected log');
+  });
+
   it('W3-03 文件弹层 Escape 归还焦点，丢弃迟到文件列表、正文与索引', async () => {
     const incoming = '/safe/next/new.log';
     const api = mockLogs({ dirs: { [session.targetPath]: listing, [second.targetPath]: [{ kind: 'file', name: 'new.log', path: incoming }] } });
@@ -296,6 +336,39 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     expect(clipboard).toHaveBeenLastCalledWith(expected.map((entry) => entry.text).join('\n'));
     expect(ui.line(3).text()).toContain('WARN another');
     expect(ui.el('log-error-index').text()).toContain('当前来源无错误行');
+  });
+
+  it('W3-07 以全文件命中序号在 L200 与 L201 之间往返，追加后仍按命中游标翻页', async () => {
+    const keyword = 'component=local-collector';
+    const logs = rows(Array.from({ length: 2200 }, (_, index) =>
+      index >= 205 && index < 214 ? 'INFO unmatched' : 'INFO ' + keyword));
+    const matches = logs.filter(({ text }) => text.includes(keyword));
+    const api = mockLogs({ files: { [single.targetPath]: logs } });
+    const ui = await inspectorFor(single);
+    const position = (line: number, ordinal: number) => {
+      expect(ui.line(line).attributes('data-selected')).toBe('true');
+      expect(ui.el('log-match-count').text()).toBe(ordinal + ' / 2191 命中');
+    };
+    await ui.wrapper.get<HTMLInputElement>(test('log-search-input')).setValue(keyword);
+    await ui.wrapper.get('form').trigger('submit');
+    await flushPromises();
+    position(1, 1);
+    await click(ui.wrapper, 'log-next-page');
+    position(201, 201);
+    await click(ui.wrapper, 'log-search-prev');
+    position(200, 200);
+    await click(ui.wrapper, 'log-search-next');
+    position(201, 201);
+
+    await click(ui.wrapper, 'log-load-more');
+    await click(ui.wrapper, 'log-next-page');
+    const fourthStart = matches[600]!.lineNumber;
+    expect(api.see(fileRoute(single), { q: keyword, startLine: String(fourthStart) })).toBe(true);
+    position(fourthStart, 601);
+    await click(ui.wrapper, 'log-search-prev');
+    position(matches[599]!.lineNumber, 600);
+    await click(ui.wrapper, 'log-search-next');
+    position(fourthStart, 601);
   });
 
   it('W3-08 多页累积 2480 行并以固定 24 px 虚拟窗口响应滚动', async () => {
