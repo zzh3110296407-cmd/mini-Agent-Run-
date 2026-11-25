@@ -2,6 +2,7 @@ import type { ArtifactStorePort, TraceWorkspacePort } from '@mini-agent-run/agen
 import type { LLMProvider } from '@mini-agent-run/ai';
 import type { PriorSessionRun } from '@mini-agent-run/debug-agent';
 import type { AgentEvent, InvestigationRun, RunEventEnvelope, Session, ToolMode } from '@mini-agent-run/shared';
+import type { RunRedactor } from './run-redaction.js';
 
 export type AgentEndEvent = Extract<AgentEvent, { type: 'agent_end' }>;
 
@@ -25,7 +26,7 @@ export interface ResolvedLlmProvider {
   provider: LLMProvider;
   modelId: string;
   providerName: string;
-  redact?: (text: string) => string;
+  redactor?: RunRedactor;
 }
 
 export type RunProviderResolver = (apiKeyOverride?: string) => ResolvedLlmProvider;
