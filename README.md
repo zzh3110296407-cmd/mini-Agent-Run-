@@ -27,9 +27,12 @@ SQLite 将数据持久化在 `sessions`、`investigation_runs`、`run_events` �
 
 ## 环境要求与本地启动
 
-安装 Node.js 20 或更高版本与 npm。CI 使用 Node.js 24，本地也推荐使用 24。在仓库根目录执行：
+使用 Node.js 24 LTS（24.11.0 或更新的 24.x）及 npm。当前锁文件已在 Node.js 24.11.0 通过完整门禁，CI 也使用 Node.js 24。早期方案中的 Node.js 20.0.0 会在 Fastify 加载锁定的 ESM 依赖时触发 `ERR_REQUIRE_ESM`。
+
+在仓库根目录执行以下命令，先确认 `node --version` 符合上述要求，再安装依赖：
 
 ```powershell
+node --version
 npm install
 Copy-Item .env.example .env
 ```

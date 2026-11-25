@@ -184,7 +184,7 @@ describe('E2E-06 e2e-smoke CLI contract', () => {
       }
       expect(reports[0]).toEqual(reports[1]);
     } finally { stdout.mockRestore(); }
-    expect(readFileSync(log)).toEqual(bytes);
+    expect(readFileSync(log).equals(bytes), 'Original fixture bytes changed').toBe(true);
     expect(repoStatus()).toBe(before);
   }, 12_000);
 });

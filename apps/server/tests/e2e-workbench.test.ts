@@ -211,7 +211,7 @@ describe('F12_E2E_VERIFICATION_SUITE real HTTP and disk SQLite', () => {
           expect(cleared.prepare<[], { count: number }>('SELECT count(*) AS count FROM ' + table).get()?.count).toBe(0);
         }
       } finally { cleared.close(); }
-      expect(readFileSync(filePath)).toEqual(original);
+      expect(readFileSync(filePath).equals(original), 'Original fixture bytes changed').toBe(true);
     } finally {
       await workbench.close();
       expect(existsSync(workbench.directory)).toBe(false);
