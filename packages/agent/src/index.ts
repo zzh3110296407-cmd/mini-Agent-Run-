@@ -2,6 +2,9 @@ import type {
   AgentMessage, ArtifactContentType, ArtifactMeta, LogLevel, PathType, TextSliceResponse, ToolMode, ToolOutputSummary,
 } from '@mini-agent-run/shared';
 
+export { runAgentLoop, type RunAgentLoopOptions } from './loop.js';
+export { projectToLLMMessages } from './projection.js';
+
 export const AGENT_PACKAGE_NAME = '@mini-agent-run/agent';
 
 export interface SaveArtifactInput {
