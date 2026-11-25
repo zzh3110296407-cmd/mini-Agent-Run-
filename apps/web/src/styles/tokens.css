@@ -1,0 +1,154 @@
+/* ==========================================================================
+   Mini Agent Run Workbench — Design Tokens (Dark Default + Optional Light)
+   Aligned with WCAG AA (>= 4.5:1 text contrast) & DevTools Compact Density
+   ========================================================================== */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* 1. Surface Hierarchy (shadcn/ui background / sidebar / card / popover) */
+  --bg-canvas: #0b0e14;          /* 中栏主画布底色 */
+  --bg-panel: #111620;           /* 左栏会话栏、顶部栏、右栏大日志检视器 */
+  --bg-elevated: #171d2a;        /* 工具卡片、结论卡片、输入框容器、Modal 主体 */
+  --bg-muted: #0e131d;           /* 代码块底色、日志行号槽底色、只读置灰态 */
+  --bg-hover: #1e2638;           /* 列表行/按钮悬停态 */
+  --bg-active: #243049;          /* 当前选中会话、激活 Tab 态 */
+  --bg-backdrop: rgba(5, 8, 13, 0.68); /* Modal / Sheet 半透明遮罩 */
+
+  /* 2. Borders & Focus Rings */
+  --border-subtle: #232b3b;      /* 主分隔线、卡片常规描边 */
+  --border-strong: #334155;      /* 悬停强调描边、拖拽手柄激活态、kbd 边框 */
+  --ring-border: #3b82f6;        /* Uiverse / shadcn 聚焦边框色 */
+  --ring-glow: rgba(59, 130, 246, 0.18); /* 柔和聚焦外发光 */
+
+  /* 3. Typography Colors (WCAG AA Checked against #0B0E14 & #171D2A) */
+  --text-primary: #f1f5f9;       /* 主标题、正文、日志原文 (对比度 ~16.8:1) */
+  --text-secondary: #94a3b8;     /* 次要元信息、工具参数摘要 (对比度 ~7.1:1) */
+  --text-muted: #64748b;         /* 占位符、禁用文案、行号 (非正文辅助 ≥ 3.8:1，小字配 #7c8ea6 达 4.6:1) */
+  --text-subtle-readable: #7c8ea6; /* 12px 辅助标签可读色 (对比度 4.7:1) */
+  --text-code: #e2e8f0;          /* 行内代码与等宽路径颜色 */
+
+  /* 4. Primary Brand / Interactive Accent */
+  --accent-primary: #3b82f6;
+  --accent-primary-hover: #2563eb;
+  --accent-primary-fg: #ffffff;
+  --accent-soft-bg: rgba(59, 130, 246, 0.14);
+  --accent-soft-border: rgba(96, 165, 250, 0.34);
+  --accent-soft-fg: #93c5fd;
+
+  /* 5. Semantic Run & Log Status (严格区分 stopped 与 failed!) */
+  /* pending: 队列等待 */
+  --status-pending-fg: #cbd5e1;
+  --status-pending-bg: rgba(148, 163, 184, 0.12);
+  --status-pending-border: rgba(148, 163, 184, 0.28);
+
+  /* running: 活跃执行中 */
+  --status-running-fg: #60a5fa;
+  --status-running-dot: #3b82f6;
+  --status-running-bg: rgba(59, 130, 246, 0.14);
+  --status-running-border: rgba(59, 130, 246, 0.36);
+
+  /* completed / passed: 成功完成 */
+  --status-completed-fg: #34d399;
+  --status-completed-bg: rgba(16, 185, 129, 0.13);
+  --status-completed-border: rgba(16, 185, 129, 0.34);
+
+  /* stopped (user_abort / max_steps / server_restarted): 人工或受控中止（琥珀暖灰，绝不用红叉） */
+  --status-stopped-fg: #fbbf24;
+  --status-stopped-bg: rgba(245, 158, 11, 0.13);
+  --status-stopped-border: rgba(245, 158, 11, 0.34);
+
+  /* failed / ERROR / destructive: 异常失败或错误日志 */
+  --status-failed-fg: #f87171;
+  --status-failed-solid: #ef4444;
+  --status-failed-solid-hover: #dc2626;
+  --status-failed-bg: rgba(239, 68, 68, 0.13);
+  --status-failed-border: rgba(239, 68, 68, 0.36);
+
+  /* WARN / retryLoop / slowSpan: 警告与性能高信号 */
+  --status-warn-fg: #fbbf24;
+  --status-warn-bg: rgba(245, 158, 11, 0.12);
+  --status-warn-border: rgba(245, 158, 11, 0.30);
+
+  /* INFO: 普通信息标签 */
+  --status-info-fg: #60a5fa;
+  --status-info-bg: rgba(96, 165, 250, 0.12);
+  --status-info-border: rgba(96, 165, 250, 0.28);
+
+  /* 6. Log Inspector & Evidence Highlighting */
+  --log-row-error-bg: rgba(239, 68, 68, 0.09);
+  --log-row-warn-bg: rgba(245, 158, 11, 0.07);
+  --log-evidence-bg: rgba(59, 130, 246, 0.18);
+  --log-evidence-bar: #3b82f6;
+
+  /* 7. Typography Families & Numeric Discipline */
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+
+  /* 8. Sizing, Spacing & Radius Scale (Compact Precision Workbench) */
+  --topbar-height: 44px;
+  --sidebar-width: 264px;
+  --inspector-default-width: 560px;
+  --inspector-min-width: 340px;
+  --inspector-max-width: 720px;
+  --log-row-height: 24px;        /* 固定单行高度，支撑精确虚拟滚动计算 */
+
+  --radius-xs: 4px;              /* kbd、行内 code、小计数角标 */
+  --radius-sm: 6px;              /* 按钮、Badge、单行紧凑输入、工具折叠卡 */
+  --radius-md: 8px;              /* 根因卡片、目录浏览框 */
+  --radius-lg: 12px;             /* Sticky Composer 输入舱、Modal 弹窗 */
+
+  /* 9. Z-Index Layering (防止 Sidebar / Sheet / Modal 层级打架) */
+  --z-sticky: 10;                /* 高信号跳转条、回到底部胶囊、Sticky Composer */
+  --z-resize-handle: 20;         /* 分栏拖拽条 */
+  --z-drawer: 40;                /* <1280px 侧滑 Sheet 抽屉与遮罩 */
+  --z-modal: 50;                 /* Path Picker Dialog / Delete AlertDialog */
+  --z-popover: 60;               /* Evidence HoverCard / Toast 轻提示 */
+
+  /* 10. Motion */
+  --ease-snappy: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 140ms;
+  --duration-normal: 200ms;
+}
+
+/* 可选亮色主题（一键切换 data-theme="light" 即生效） */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-canvas: #f8fafc;
+  --bg-panel: #f1f5f9;
+  --bg-elevated: #ffffff;
+  --bg-muted: #e2e8f0;
+  --bg-hover: #e2e8f0;
+  --bg-active: #dbeafe;
+  --bg-backdrop: rgba(15, 23, 42, 0.42);
+
+  --border-subtle: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --ring-border: #2563eb;
+  --ring-glow: rgba(37, 99, 235, 0.16);
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-subtle-readable: #475569;
+  --text-code: #1e293b;
+
+  --accent-primary: #2563eb;
+  --accent-primary-hover: #1d4ed8;
+  --accent-primary-fg: #ffffff;
+  --accent-soft-bg: rgba(37, 99, 235, 0.10);
+  --accent-soft-border: rgba(37, 99, 235, 0.28);
+  --accent-soft-fg: #1d4ed8;
+
+  --status-pending-fg: #475569;
+  --status-running-fg: #1d4ed8;
+  --status-completed-fg: #047857;
+  --status-stopped-fg: #b45309;
+  --status-failed-fg: #b91c1c;
+  --status-warn-fg: #b45309;
+  --status-info-fg: #1d4ed8;
+
+  --log-evidence-bg: rgba(37, 99, 235, 0.12);
+}
