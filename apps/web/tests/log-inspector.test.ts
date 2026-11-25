@@ -117,7 +117,7 @@ async function inspectorFor(initial: Session) {
   wrappers.push(wrapper);
   await flushPromises();
   return {
-    wrapper, sessionRef, inspector,
+    wrapper, sessionRef, open, inspector,
     el: (id: string) => wrapper.get(test(id)),
     line: (number: number) => wrapper.get(test('log-line') + lineAttr(number)),
     errorAt: (number: number) => wrapper.get(test('log-error-jump') + jumpAttr(number)),
@@ -369,6 +369,63 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     position(matches[599]!.lineNumber, 600);
     await click(ui.wrapper, 'log-search-next');
     position(fourthStart, 601);
+  });
+
+  it('W3-07 从 L115 证据搜索并重开检视器，恢复全局序号并可从 L75 退到 L74', async () => {
+    const keyword = 'component=local-collector';
+    const logs = rows(Array.from({ length: 2200 }, (_, index) =>
+      index >= 600 && index < 609 ? 'INFO unmatched' : 'INFO ' + keyword));
+    mockLogs({ files: { [single.targetPath]: logs } });
+    const ui = await inspectorFor(single);
+    ui.inspector.openTarget({ mode: 'file', sessionId: single.id, line: 115 });
+    await flushPromises();
+    expect(ui.line(115).attributes('data-selected')).toBe('true');
+    await ui.wrapper.get<HTMLInputElement>(test('log-search-input')).setValue(keyword);
+    await ui.wrapper.get('form').trigger('submit');
+    await flushPromises();
+    expect(ui.el('log-match-count').text()).toBe('1 / 2191 命中');
+    ui.open.value = false;
+    await flushPromises();
+    expect(ui.wrapper.find(test('log-inspector-drawer')).exists()).toBe(false);
+    ui.open.value = true;
+    await flushPromises();
+    expect(ui.wrapper.get<HTMLInputElement>(test('log-search-input')).element.value).toBe(keyword);
+    expect(ui.line(115).attributes('data-selected')).toBe('true');
+    expect(ui.el('log-match-count').text()).toBe('115 / 2191 命中');
+    for (let i = 0; i < 40; i++) await click(ui.wrapper, 'log-search-prev');
+    expect(ui.line(75).attributes('data-selected')).toBe('true');
+    expect(ui.el('log-match-count').text()).toBe('75 / 2191 命中');
+    await click(ui.wrapper, 'log-search-prev');
+    expect(ui.line(74).attributes('data-selected')).toBe('true');
+    expect(ui.el('log-match-count').text()).toBe('74 / 2191 命中');
+  });
+
+  it('W3-07 重开稀疏的过滤搜索时重建证据前的命中页和游标', async () => {
+    const keyword = 'sparse-match';
+    const logs = rows(Array.from({ length: 901 }, (_, index) =>
+      (index % 2 === 0 ? 'INFO ' : 'WARN ') + keyword));
+    mockLogs({ files: { [single.targetPath]: logs } });
+    const ui = await inspectorFor(single);
+    ui.inspector.openTarget({ mode: 'file', sessionId: single.id, line: 401 });
+    await flushPromises();
+    await ui.wrapper.get('[data-log-level="info"]').trigger('click');
+    await ui.wrapper.get<HTMLInputElement>(test('log-search-input')).setValue(keyword);
+    await ui.wrapper.get('form').trigger('submit');
+    await flushPromises();
+    ui.open.value = false;
+    await flushPromises();
+    ui.open.value = true;
+    await flushPromises();
+
+    const position = (line: number, ordinal: number) => {
+      expect(ui.line(line).attributes('data-selected')).toBe('true');
+      expect(ui.el('log-match-count').text()).toBe(ordinal + ' / 451 命中');
+    };
+    position(401, 201);
+    await click(ui.wrapper, 'log-search-prev');
+    position(399, 200);
+    await click(ui.wrapper, 'log-search-next');
+    position(401, 201);
   });
 
   it('W3-08 多页累积 2480 行并以固定 24 px 虚拟窗口响应滚动', async () => {

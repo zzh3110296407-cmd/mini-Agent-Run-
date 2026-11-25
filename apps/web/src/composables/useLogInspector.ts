@@ -175,7 +175,25 @@ export function useLogInspector({
           offset = contextStart(target);
         }
       }
-      const result = await read(current, offset, { level, q: query || undefined });
+      const searchAnchor = query ? target : undefined;
+      const filters = { level, q: query || undefined };
+      let result = await read(current, searchAnchor === undefined ? offset : 1, filters);
+      let paging = navigation;
+      if (searchAnchor !== undefined) {
+        // An evidence offset is a file coordinate. Follow search cursors to recover rank and earlier pages.
+        const previous: BodyPage[] = [];
+        let matchesBefore = 0;
+        let next = nextOffset(result.slice);
+        while (accept() && next !== null && !result.slice.lines.some(({ lineNumber }) => lineNumber >= searchAnchor)) {
+          previous.push({ offset: result.slice.offsetLine, matchesBefore });
+          matchesBefore += result.slice.lines.length;
+          result = await read(current, next, filters);
+          next = nextOffset(result.slice);
+        }
+        paging = { previous, matchesBefore };
+        const match = result.slice.lines.find(({ lineNumber }) => lineNumber >= searchAnchor) ?? result.slice.lines.at(-1);
+        target = match?.lineNumber;
+      }
       if (!accept()) return false;
       activeArtifactMeta.value = result.artifact;
       slice.value = result.slice;
@@ -183,12 +201,12 @@ export function useLogInspector({
       // Slice offsets are physical line numbers. Count accepted matches to determine the global ordinal.
       const page = {
         offset: result.slice.offsetLine,
-        matchesBefore: append ? matchesBeforeWindow.value + previousLines.length : navigation?.matchesBefore ?? 0,
+        matchesBefore: append ? matchesBeforeWindow.value + previousLines.length : paging?.matchesBefore ?? 0,
       };
       displayedPages.value = append ? [...displayedPages.value, page] : [page];
-      if (navigation) previousPages.value = navigation.previous;
+      if (paging) previousPages.value = paging.previous;
       loadedLines.value = orderedLines(previousLines, result.slice.lines);
-      const match = query && !append ? loadedLines.value.at(navigation?.selectLast ? -1 : 0) : undefined;
+      const match = query && !append ? loadedLines.value.at(paging?.selectLast ? -1 : 0) : undefined;
       const selected = target ?? match?.lineNumber;
       if (selected !== undefined && loadedLines.value.some(({ lineNumber }) => lineNumber === selected)) selectLine(selected);
       return true;
