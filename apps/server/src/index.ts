@@ -1,8 +1,10 @@
 import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from 'dotenv';
-import { buildApp } from './app.js';
 import { parseEnv, splitAllowedTraceRoots } from './config/env.js';
+import { WORKSPACE_ROOT } from './fs/path-sandbox.js';
+import { startServer } from './start-server.js';
 
 const envPath = fileURLToPath(new URL('../../../.env', import.meta.url));
 if (existsSync(envPath)) {
@@ -11,22 +13,22 @@ if (existsSync(envPath)) {
 }
 
 const env = parseEnv(process.env);
-const app = buildApp({ allowedTraceRoots: splitAllowedTraceRoots(env.ALLOWED_TRACE_ROOTS) });
-
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => {
-    app.close().catch((error: unknown) => {
-      console.error(error);
-      process.exitCode = 1;
-    });
-  });
-}
+const dbPath = env.DB_PATH === ':memory:' ? env.DB_PATH : resolve(WORKSPACE_ROOT, env.DB_PATH);
 
 try {
-  const address = await app.listen({ host: '127.0.0.1', port: env.PORT });
+  const { app, address } = await startServer({
+    dbPath, port: env.PORT, allowedTraceRoots: splitAllowedTraceRoots(env.ALLOWED_TRACE_ROOTS),
+  });
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      app.close().catch((error: unknown) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    });
+  }
   console.log(`Server listening at ${address}`);
 } catch (error) {
   console.error(error);
-  await app.close();
   process.exitCode = 1;
 }

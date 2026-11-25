@@ -1,21 +1,26 @@
 import { APP_NAME, HealthResponseSchema } from '@mini-agent-run/shared';
 import Fastify from 'fastify';
 import { DEFAULT_ALLOWED_TRACE_ROOTS, splitAllowedTraceRoots } from './config/env.js';
-import { checkSqliteSmoke } from './db/smoke.js';
+import { openAppDatabase, recoverStaleRuns, type DatabaseOwnerLock } from './db/database.js';
 import { PathSandboxError, WORKSPACE_ROOT, browseSafeDirectory, resolveAllowedRoots } from './fs/path-sandbox.js';
+import { registerSessionRoutes } from './session-routes.js';
 
 export interface BuildAppOptions {
   allowedTraceRoots?: readonly string[];
   baseDir?: string;
+  dbPath?: string;
+  maxFileSliceBytes?: number;
 }
 
-export function buildApp(options: BuildAppOptions = {}) {
+export function buildApp(options: BuildAppOptions = {}, ownerLock?: DatabaseOwnerLock) {
   const app = Fastify();
   const rawRoots = options.allowedTraceRoots ?? splitAllowedTraceRoots(DEFAULT_ALLOWED_TRACE_ROOTS);
   const baseDir = options.baseDir ?? WORKSPACE_ROOT;
+  const resolveRoots = () => resolveAllowedRoots(rawRoots, baseDir);
 
   app.get('/api/health', async (_request, reply) => {
-    if (!checkSqliteSmoke()) {
+    const row = db.prepare<[], { ok: number }>('SELECT 1 AS ok').get();
+    if (row?.ok !== 1) {
       return reply.code(503).send({ status: 'unavailable', sqlite: 'error' });
     }
 
@@ -31,13 +36,23 @@ export function buildApp(options: BuildAppOptions = {}) {
     try {
       const { path } = request.query;
       if (path !== undefined && typeof path !== 'string') throw new PathSandboxError('INVALID_PATH');
-      const roots = resolveAllowedRoots(rawRoots, baseDir);
-      return browseSafeDirectory(path, roots, baseDir);
+      return browseSafeDirectory(path, resolveRoots(), baseDir);
     } catch (error) {
       if (!(error instanceof PathSandboxError)) throw error;
       return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     }
   });
 
-  return app;
+  const db = openAppDatabase(ownerLock?.dbPath ?? options.dbPath ?? ':memory:');
+  try {
+    registerSessionRoutes(app, db, resolveRoots, { baseDir, maxFileSliceBytes: options.maxFileSliceBytes });
+    app.addHook('onClose', async () => {
+      db.close();
+      ownerLock?.release();
+    });
+    return Object.assign(app, { recoverStaleRuns: () => recoverStaleRuns(db) });
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
