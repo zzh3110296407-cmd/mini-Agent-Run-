@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import type { CreateSessionRequest, SessionId, SessionListItem } from '@mini-agent-run/shared';
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue';
+import LargeLogInspector from './components/inspector/LargeLogInspector.vue';
 import AppTopbar from './components/layout/AppTopbar.vue';
-import InspectorTargetPreview from './components/layout/InspectorTargetPreview.vue';
 import ResizableDivider from './components/layout/ResizableDivider.vue';
-import SessionTargetSummary from './components/layout/SessionTargetSummary.vue';
 import DeleteSessionAlert from './components/sidebar/DeleteSessionAlert.vue';
 import PathPickerModal from './components/sidebar/PathPickerModal.vue';
 import SessionSidebar from './components/sidebar/SessionSidebar.vue';
@@ -15,6 +14,7 @@ import UiIcon from './components/ui/UiIcon.vue';
 import UiSheet from './components/ui/UiSheet.vue';
 import { useApiKeySettings } from './composables/useApiKeySettings';
 import { useHealthProbe } from './composables/useHealthProbe';
+import { useLogInspector } from './composables/useLogInspector';
 import { formatPathError, type PathError } from './composables/usePathBrowser';
 import { useRunStream, type InspectorTargetRequest } from './composables/useRunStream';
 import { formatSessionError, useSessions } from './composables/useSessions';
@@ -28,7 +28,6 @@ const creationError = shallowRef<PathError | null>(null);
 const deletionTarget = shallowRef<SessionListItem | null>(null);
 const deleting = ref(false);
 const deletionError = ref('');
-const pendingInspectorTarget = shallowRef<InspectorTargetRequest | null>(null);
 const { hasCustomApiKey } = useApiKeySettings();
 const { health, checkHealth } = useHealthProbe();
 const { viewport, theme, inspectorOpen, sidebarDrawerOpen, inspectorWidth, toggleTheme, setInspectorWidth } = useWorkbenchLayout();
@@ -48,7 +47,6 @@ const stream = useRunStream({
     void refreshSessions();
   },
 });
-watch(activeSessionId, () => { pendingInspectorTarget.value = null; });
 
 const summary = computed(() => {
   const listed = sessions.value.find(({ id }) => id === activeSessionId.value);
@@ -60,6 +58,8 @@ const summary = computed(() => {
     hasActiveRun: listed?.hasActiveRun ?? detail?.hasActiveRun ?? false,
   };
 });
+const inspectorSession = computed(() => summary.value?.session ?? null);
+const logInspector = useLogInspector({ session: inspectorSession, open: inspectorOpen });
 
 function openPicker() {
   creationError.value = null;
@@ -133,9 +133,16 @@ function toggleInspector() {
 }
 
 function openInspector(target: InspectorTargetRequest) {
-  pendingInspectorTarget.value = target;
+  logInspector.openTarget(target);
   inspectorOpen.value = true;
   if (viewport.value !== 'desktop') sidebarDrawerOpen.value = false;
+}
+
+function closeFilePickerOnEscape(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || !logInspector.filePickerOpen.value) return;
+  event.preventDefault();
+  event.stopPropagation();
+  logInspector.filePickerOpen.value = false;
 }
 
 async function handleKeyboard(event: KeyboardEvent) {
@@ -162,8 +169,14 @@ async function handleKeyboard(event: KeyboardEvent) {
   document.querySelector<HTMLInputElement>('[data-testid="session-filter-input"]')?.focus();
 }
 
-onMounted(() => window.addEventListener('keydown', handleKeyboard));
-onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
+onMounted(() => {
+  window.addEventListener('keydown', closeFilePickerOnEscape, true);
+  window.addEventListener('keydown', handleKeyboard);
+});
+onUnmounted(() => {
+  window.removeEventListener('keydown', closeFilePickerOnEscape, true);
+  window.removeEventListener('keydown', handleKeyboard);
+});
 </script>
 
 <template>
@@ -195,11 +208,8 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
         <ResizableDivider :width="inspectorWidth" @update:width="setInspectorWidth" />
         <aside id="inspector-panel" class="inspector" :style="{ width: inspectorWidth + 'px' }" aria-label="日志检视器">
           <h2>日志检视器</h2>
-          <div class="inspector-content">
-            <InspectorTargetPreview v-if="summary && pendingInspectorTarget" :target="pendingInspectorTarget" :target-path="summary.session.targetPath" />
-            <SessionTargetSummary v-else-if="summary" v-bind="summary" />
-            <UiEmpty v-else title="选择会话后可查看绑定目标" />
-          </div>
+          <LargeLogInspector v-if="inspectorSession" :key="inspectorSession.id" :session="inspectorSession" :inspector="logInspector" />
+          <UiEmpty v-else class="inspector-empty" title="选择会话后可查看绑定目标" />
         </aside>
       </template>
     </div>
@@ -213,10 +223,9 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
       v-if="viewport !== 'desktop'" id="inspector-panel" :open="inspectorOpen" side="right" title="日志检视器"
       @close="inspectorOpen = false"
     >
-      <div class="inspector-content">
-        <InspectorTargetPreview v-if="summary && pendingInspectorTarget" :target="pendingInspectorTarget" :target-path="summary.session.targetPath" />
-        <SessionTargetSummary v-else-if="summary" v-bind="summary" />
-        <UiEmpty v-else title="选择会话后可查看绑定目标" />
+      <div class="inspector-sheet-body">
+        <LargeLogInspector v-if="inspectorSession" :key="inspectorSession.id" :session="inspectorSession" :inspector="logInspector" />
+        <UiEmpty v-else class="inspector-empty" title="选择会话后可查看绑定目标" />
       </div>
     </UiSheet>
     <PathPickerModal
@@ -236,9 +245,10 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
 .workspace { display: flex; flex: 1; flex-direction: column; min-width: 0; overflow: hidden; }
 .workspace-inner { width: min(100%, 760px); margin-inline: auto; padding: 27px clamp(16px, 4vw, 32px); overflow: auto; }
 .workspace h1 { margin: 0 0 15px; font-size: 23px; line-height: 1.28; letter-spacing: -.025em; overflow-wrap: anywhere; }
-.inspector > h2 { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
-.inspector { max-width: calc(100% - var(--sidebar-width) - 285px); overflow: auto; }
-.inspector-content { padding: 12px; }
+.inspector > h2 { flex: none; margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
+.inspector { display: flex; max-width: calc(100% - var(--sidebar-width) - 285px); flex-direction: column; overflow: hidden; }
+.inspector-sheet-body { display: flex; min-height: 0; height: 100%; }
+.inspector-empty { margin: 12px; }
 @media (max-width: 600px) {
   .workspace-inner { padding-top: 20px; }
   .workspace h1 { font-size: 19px; }

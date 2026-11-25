@@ -66,7 +66,7 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · W3-01', () => {
       text: JSON.stringify({ result: html }, null, 2), formattedCount: 1, plainCount: 0,
     });
     expect(formatSliceAsJson([line(12, json), line(19, '  普通日志\t'), line(24, 'false'), line(31, '')])).toEqual({
-      text: '// L12\n' + JSON.stringify({ result: html }, null, 2) + '\n  普通日志\t\n// L24\nfalse\n',
+      text: '// 原始行 12\n' + JSON.stringify({ result: html }, null, 2) + '\n  普通日志\t\n// 原始行 24\nfalse\n',
       formattedCount: 2, plainCount: 2,
     });
     expect(formatSliceAsJson([])).toEqual({ text: '', formattedCount: 0, plainCount: 0 });

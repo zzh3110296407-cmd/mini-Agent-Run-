@@ -17,7 +17,7 @@ export function formatSliceAsJson(lines: readonly LogLine[]): { text: string; fo
     const formatted = prettyJson(line.text);
     if (formatted === undefined) return line.text;
     formattedCount++;
-    return '// L' + line.lineNumber + '\n' + formatted;
+    return '// 原始行 ' + line.lineNumber + '\n' + formatted;
   }).join('\n');
   return { text, formattedCount, plainCount: lines.length - formattedCount };
 }

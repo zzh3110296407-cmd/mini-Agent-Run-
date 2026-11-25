@@ -8,7 +8,7 @@ import UiIcon from '../ui/UiIcon.vue';
 const props = defineProps<{ inspector: ReturnType<typeof useLogInspector> }>();
 const {
   sourceMode, fileOptions, filePickerOpen, fileListLoading, fileListError, selectedFilePath,
-  activeArtifactId, activeArtifactMeta, slice, loading, loadingMore, focusRange, levelFilter,
+  activeArtifactId, activeArtifactMeta, slice, loading, loadingMore, focusRange, levelFilter, evidenceTarget,
   searchQuery, activeMatchIndex, viewMode, changeQuery, changeLevel, chooseFile,
   navigateMatch, jumpToLine, returnToOriginalFile, retryFiles,
 } = props.inspector;
@@ -26,7 +26,7 @@ watch(filePickerOpen, async (opened) => {
     chooser.value?.querySelector('button')?.focus();
   }
 });
-watch(searchQuery, (value) => {
+watch([searchQuery, sourceMode, selectedFilePath, activeArtifactId, evidenceTarget], ([value]) => {
   clearTimeout(debounce);
   draft.value = value;
 });

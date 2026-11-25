@@ -3,9 +3,11 @@ import { MAX_ARTIFACT_SLICE_LINES, type FsBrowseEntry, type LogLine, type Sessio
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { defineComponent, h, nextTick, ref } from 'vue';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import App from '../src/App.vue';
 import LargeLogInspector from '../src/components/inspector/LargeLogInspector.vue';
 import { useLogInspector } from '../src/composables/useLogInspector';
-import { artifact, session } from './fixtures';
+import { artifact, health, run, session } from './fixtures';
+import { closedRun, conclusion, frame } from './timeline-fixtures';
 
 const single: Session = { ...session, id: 'ses_single', pathType: 'file', targetPath: '/safe/solo.log' };
 const second: Session = { ...session, id: 'ses_next', targetPath: '/safe/next' };
@@ -342,7 +344,84 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     expect(ui.line(1).get(test('log-line-text')).element.textContent).toBe(hostile);
     expect(ui.wrapper.findAll('script,img,iframe')).toHaveLength(0);
     await click(ui.wrapper, 'log-view-mode-toggle');
-    expect(ui.el('log-json-view').element.textContent).toBe(hostile + '\n// L2\n' + JSON.stringify({ payload: html }, null, 2));
+    expect(ui.el('log-json-view').element.textContent).toBe(hostile + '\n// 原始行 2\n' + JSON.stringify({ payload: html }, null, 2));
     expect(ui.wrapper.findAll('script,img,iframe')).toHaveLength(0);
+  });
+
+  it('W3-10 App 串联三类证据与工具入口，窄屏 Escape 优先关闭文件弹层', async () => {
+    vi.stubGlobal('innerWidth', 1536);
+    const record = { ...closedRun, lastSeq: 2, conclusion: {
+      ...conclusion, evidence: [
+        { kind: 'file_line' as const, file: original, startLine: 115, endLine: 117, label: '原始证据' },
+        { kind: 'file_step' as const, file: original, step: 7, label: '步骤证据' },
+        { kind: 'artifact_line' as const, artifactId: artifact.id, startLine: 219, label: '产物证据' },
+      ],
+    } };
+    const api = mockLogs({
+      files: { [original]: large(320, { 15: 'INFO step 70', 66: 'INFO step 7 complete' }) },
+      artifactLines: large(240),
+      other(url) {
+        if (same(url, '/api/health')) return Response.json(health);
+        if (same(url, '/api/sessions')) return Response.json({ sessions: [
+          { ...session, hasActiveRun: false, runCount: 1 }, { ...single, hasActiveRun: false, runCount: 0 },
+        ] });
+        if (same(url, '/api/sessions/' + session.id)) return Response.json({ session, hasActiveRun: false, runs: [record] });
+        if (same(url, '/api/sessions/' + single.id)) return Response.json({ session: single, hasActiveRun: false, runs: [] });
+        if (!same(url, '/api/runs/' + run.id)) return;
+        return Response.json({ run: record, events: [
+          frame(1, { type: 'tool_execution_start', toolCallId: 'tc_proof', toolName: 'search_logs', step: 1, arguments: {} }),
+          frame(2, { type: 'tool_execution_end', toolCallId: 'tc_proof', toolName: 'search_logs', step: 1,
+            durationMs: 12, isError: false, preview: 'tool result', artifactId: artifact.id }),
+        ] });
+      },
+    });
+    const wrapper = mount(App, { attachTo: document.body, global: { stubs: { teleport: true } } });
+    wrappers.push(wrapper);
+    await flushPromises();
+    const chip = (kind: string) => wrapper.get(test('evidence-chip') + '[data-evidence-kind="' + kind + '"]');
+    const line = (number: number) => wrapper.get(test('log-line') + lineAttr(number));
+    expect(wrapper.find('#inspector-panel').exists()).toBe(false);
+    await chip('file_line').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('#inspector-panel').element.tagName).toBe('ASIDE');
+    expect(api.see(fileRoute(session), { file: original, startLine: '75' })).toBe(true);
+    expect([115, 116, 117].map((n) => line(n).attributes('data-highlighted'))).toEqual(['true', 'true', 'true']);
+    expect(line(118).attributes('data-highlighted')).toBe('false');
+    expect(wrapper.get(test('inspector-target-preview')).text()).toContain('L115–L117');
+
+    await chip('file_step').trigger('click');
+    await flushPromises();
+    expect(api.see(fileRoute(session), { q: '"step": 7' })).toBe(true);
+    expect(api.see(fileRoute(session), { q: 'step 7' })).toBe(true);
+    expect(api.see(fileRoute(session), { startLine: '26', q: null })).toBe(true);
+    expect(line(66).attributes('data-selected')).toBe('true');
+    expect(wrapper.get(test('log-step-notice')).text()).toBe('Step #7');
+    await chip('artifact_line').trigger('click');
+    await flushPromises();
+    expect(api.see('/api/artifacts/' + artifact.id, { offsetLine: '179', level: null })).toBe(true);
+    expect(line(219).attributes('data-selected')).toBe('true');
+    await click(wrapper, 'return-to-original-file');
+    expect(wrapper.get(test('log-source-type')).text()).toBe('原文件');
+    expect(api.calls.at(-2)?.searchParams.get('file')).toBe(original);
+
+    await click(wrapper, 'run-details-toggle');
+    await click(wrapper, 'tool-toggle-btn');
+    await click(wrapper, 'tool-inspect-btn');
+    expect(wrapper.get(test('log-source-type')).text()).toBe('Artifact');
+    expect(api.see('/api/artifacts/' + artifact.id, { offsetLine: '1', level: null })).toBe(true);
+    await click(wrapper, 'return-to-original-file');
+    vi.stubGlobal('innerWidth', 1140);
+    window.dispatchEvent(new Event('resize'));
+    await flushPromises();
+    expect(wrapper.get('#inspector-panel').attributes('role')).toBe('dialog');
+    await click(wrapper, 'log-file-choose');
+    await wrapper.get(test('log-file-option')).trigger('keydown', { key: 'Escape' });
+    await flushPromises();
+    expect(wrapper.findAll(test('log-file-option'))).toHaveLength(0);
+    expect(document.activeElement).toBe(wrapper.get(test('log-file-choose')).element);
+    expect(wrapper.find('#inspector-panel').exists()).toBe(true);
+    await wrapper.get(test('log-file-choose')).trigger('keydown', { key: 'Escape' });
+    await flushPromises();
+    expect(wrapper.find('#inspector-panel').exists()).toBe(false);
   });
 });

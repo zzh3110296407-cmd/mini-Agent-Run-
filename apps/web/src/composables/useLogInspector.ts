@@ -129,8 +129,8 @@ export function useLogInspector({
     }
   }
 
-  type PageRequest = { append?: boolean; line?: number; step?: number; resetScroll?: boolean };
-  async function loadBody(offset: number, { append = false, line, step, resetScroll = true }: PageRequest = {}) {
+  type PageRequest = { append?: boolean; line?: number; step?: number };
+  async function loadBody(offset: number, { append = false, line, step }: PageRequest = {}) {
     const current = source();
     if (!current) return false;
     const requestOffset = offset;
@@ -145,10 +145,8 @@ export function useLogInspector({
       loadedLines.value = [];
       slice.value = null;
       activeMatchIndex.value = -1;
-      if (resetScroll) {
-        selectedLine.value = null;
-        scrollRequest.value++;
-      }
+      selectedLine.value = null;
+      scrollRequest.value++;
     }
     const query = searchQuery.value;
     const level = levelFilter.value === 'all' ? undefined : levelFilter.value;
@@ -174,7 +172,7 @@ export function useLogInspector({
     } catch (issue) {
       if (accept()) {
         error.value = sliceIssue(issue, '无法读取日志切片，请重试。');
-        bodyRetry = () => loadBody(requestOffset, { append, line, step, resetScroll });
+        bodyRetry = () => loadBody(requestOffset, { append, line, step });
       }
       return false;
     } finally {
