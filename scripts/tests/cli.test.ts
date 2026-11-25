@@ -35,12 +35,19 @@ describe('M0-06 npm CLI contract', () => {
           expect(Date.parse(output.health.timestamp)).not.toBeNaN();
           return { ...output, health: { ...output.health, timestamp: null } };
         }
-        if (command === 'graph' && !existsSync('docs/feature-graph.json')) {
-          expect(output).toEqual({
-            ok: true, present: false, skipped: true, activeMilestone: null, milestones: [],
-            summary: { total: 0, required: 0, covered: 0, missing: 0, deferred: 0 },
-            nodes: [], edges: [], violations: [],
-          });
+        if (command === 'graph') {
+          if (existsSync('docs/feature-graph.json')) {
+            expect(output).toMatchObject({ ok: true, present: true, skipped: false, violations: [] });
+            expect(output.summary.missing).toBe(0);
+            expect(output.summary.required).toBeGreaterThanOrEqual(1);
+            expect(output.summary.covered).toBe(output.summary.required);
+          } else {
+            expect(output).toEqual({
+              ok: true, present: false, skipped: true, activeMilestone: null, milestones: [],
+              summary: { total: 0, required: 0, covered: 0, missing: 0, deferred: 0 },
+              nodes: [], edges: [], violations: [],
+            });
+          }
         }
         return output;
       }

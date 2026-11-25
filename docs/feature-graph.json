@@ -1,0 +1,119 @@
+{
+  "version": "1.1",
+  "milestones": ["M0", "M1-1", "M1-2", "M1-3", "M1-4", "M1-5", "M2", "M3", "M4"],
+  "activeMilestone": "M1-2",
+  "nodes": [
+    {
+      "id": "F01_SAFE_PATH_BROWSE",
+      "name": "本地安全目录浏览与白名单沙箱",
+      "milestone": "M1-2",
+      "packages": ["packages/shared", "apps/server"],
+      "summary": "在 ALLOWED_TRACE_ROOTS 白名单内安全浏览目录与轨迹日志文件，校验手动路径并严防路径穿越。"
+    },
+    {
+      "id": "F02_SESSION_WORKSPACE",
+      "name": "多会话管理与轨迹路径绑定",
+      "milestone": "M1-3",
+      "packages": ["packages/shared", "apps/server"],
+      "summary": "支持多会话创建与路径绑定、查询、重命名与安全删除（绝不删磁盘原件），SQLite 持久化不丢失。"
+    },
+    {
+      "id": "F03_PATH_SCOPED_TOOLS",
+      "name": "路径作用域按需解析与排障工具集",
+      "milestone": "M1-4",
+      "packages": ["packages/shared", "packages/tools"],
+      "summary": "提供 7 个路径作用域通用排查工具，按需解析任意格式轨迹并执行确定性异常预扫，防御性剥离 annotation，支持 mock/live DI 切换。"
+    },
+    {
+      "id": "F04_LARGE_ARTIFACT_STORE",
+      "name": "超长输出 Artifact 落库与切片检索",
+      "milestone": "M1-5",
+      "packages": ["packages/shared", "packages/tools", "apps/server"],
+      "summary": "超长工具结果全量落库 SQLite artifacts 表，支持按行分页、级别过滤与关键词检索，并向 LLM 返回摘要指针。"
+    },
+    {
+      "id": "F05_MULTI_TURN_INVESTIGATION",
+      "name": "开放式多轮对话与多步流式排查",
+      "milestone": "M2",
+      "packages": ["packages/ai", "packages/agent", "packages/debug-agent", "apps/server"],
+      "summary": "基于 Pi 风格 Message/State/Event 引擎执行多轮上下文工程与多步 Tool Calling，SSE 实时推流与单会话并发锁保护。"
+    },
+    {
+      "id": "F06_RUN_STOP_AND_INVARIANTS",
+      "name": "全链路真中断与不可逆状态机",
+      "milestone": "M2",
+      "packages": ["packages/agent", "apps/server", "specs"],
+      "summary": "通过全链路 AbortSignal 立即中止运行并落库 stopped，满足终态不可逆、单会话互斥、取消有界收敛与重启僵尸回收 4 条不变式。"
+    },
+    {
+      "id": "F07_RUN_RETRY",
+      "name": "失败或停止任务的关联重跑",
+      "milestone": "M2",
+      "packages": ["packages/shared", "apps/server"],
+      "summary": "对 failed 或 stopped 状态任务在当前会话新建关联 Run（retry_of_run_id），保留原现场并支持原问题或微调问题重跑。"
+    },
+    {
+      "id": "F08_HISTORY_REPLAY_AND_RESUME",
+      "name": "历史完整回看与刷新断点续流",
+      "milestone": "M2",
+      "packages": ["packages/shared", "apps/server"],
+      "summary": "刷新页面与重启服务后完整恢复会话与排查历史，运行中任务通过 SSE afterSeq 无缝续流。"
+    },
+    {
+      "id": "F09_SESSION_SIDEBAR_UI",
+      "name": "左栏多会话与路径选择弹窗",
+      "milestone": "M3",
+      "packages": ["apps/web"],
+      "summary": "前端左栏支持安全目录浏览弹窗与手动粘贴路径建会话、会话切换、重命名、安全删除确认及后台运行态小蓝点指示。"
+    },
+    {
+      "id": "F10_TIMELINE_AND_CONTROL_UI",
+      "name": "中栏开放式多轮时间线与执行控制",
+      "milestone": "M3",
+      "packages": ["apps/web"],
+      "summary": "中栏支持自由提问、流式推理与可折叠工具卡片、运行中停止与失败重跑、高信号跳转条（首错/重试循环/慢调用）及证据回跳。"
+    },
+    {
+      "id": "F11_LARGE_LOG_INSPECTOR_UI",
+      "name": "右栏清晰流畅安全大日志检视器",
+      "milestone": "M3",
+      "packages": ["apps/web"],
+      "summary": "支持 2000+ 行 / 350KB+ 日志流畅渲染、级别过滤、关键词高亮与上下跳转、JSON/原文切换、一键复制及零 v-html 纯文本防 XSS。"
+    },
+    {
+      "id": "F12_E2E_VERIFICATION_SUITE",
+      "name": "真实数据与诊断夹具端到端闭环",
+      "milestone": "M4",
+      "packages": ["scripts/cli", "apps/server", "apps/web"],
+      "summary": "基于 TrajErrBench/train 与本地诊断夹具完成端到端多步排查、中断重跑、大日志与 XSS 安全验证、重启恢复及可选 verify:ui 回归。"
+    }
+  ],
+  "edges": [
+    { "from": "F01_SAFE_PATH_BROWSE", "to": "F02_SESSION_WORKSPACE", "relation": "enables" },
+    { "from": "F01_SAFE_PATH_BROWSE", "to": "F03_PATH_SCOPED_TOOLS", "relation": "enables" },
+    { "from": "F02_SESSION_WORKSPACE", "to": "F03_PATH_SCOPED_TOOLS", "relation": "enables" },
+    { "from": "F02_SESSION_WORKSPACE", "to": "F04_LARGE_ARTIFACT_STORE", "relation": "enables" },
+    { "from": "F03_PATH_SCOPED_TOOLS", "to": "F04_LARGE_ARTIFACT_STORE", "relation": "enables" },
+    { "from": "F02_SESSION_WORKSPACE", "to": "F05_MULTI_TURN_INVESTIGATION", "relation": "enables" },
+    { "from": "F03_PATH_SCOPED_TOOLS", "to": "F05_MULTI_TURN_INVESTIGATION", "relation": "enables" },
+    { "from": "F04_LARGE_ARTIFACT_STORE", "to": "F05_MULTI_TURN_INVESTIGATION", "relation": "enables" },
+    { "from": "F05_MULTI_TURN_INVESTIGATION", "to": "F06_RUN_STOP_AND_INVARIANTS", "relation": "enables" },
+    { "from": "F05_MULTI_TURN_INVESTIGATION", "to": "F07_RUN_RETRY", "relation": "enables" },
+    { "from": "F06_RUN_STOP_AND_INVARIANTS", "to": "F07_RUN_RETRY", "relation": "enables" },
+    { "from": "F02_SESSION_WORKSPACE", "to": "F08_HISTORY_REPLAY_AND_RESUME", "relation": "enables" },
+    { "from": "F05_MULTI_TURN_INVESTIGATION", "to": "F08_HISTORY_REPLAY_AND_RESUME", "relation": "enables" },
+    { "from": "F06_RUN_STOP_AND_INVARIANTS", "to": "F08_HISTORY_REPLAY_AND_RESUME", "relation": "enables" },
+    { "from": "F01_SAFE_PATH_BROWSE", "to": "F09_SESSION_SIDEBAR_UI", "relation": "enables" },
+    { "from": "F02_SESSION_WORKSPACE", "to": "F09_SESSION_SIDEBAR_UI", "relation": "enables" },
+    { "from": "F08_HISTORY_REPLAY_AND_RESUME", "to": "F09_SESSION_SIDEBAR_UI", "relation": "enables" },
+    { "from": "F05_MULTI_TURN_INVESTIGATION", "to": "F10_TIMELINE_AND_CONTROL_UI", "relation": "enables" },
+    { "from": "F06_RUN_STOP_AND_INVARIANTS", "to": "F10_TIMELINE_AND_CONTROL_UI", "relation": "enables" },
+    { "from": "F07_RUN_RETRY", "to": "F10_TIMELINE_AND_CONTROL_UI", "relation": "enables" },
+    { "from": "F09_SESSION_SIDEBAR_UI", "to": "F10_TIMELINE_AND_CONTROL_UI", "relation": "enables" },
+    { "from": "F04_LARGE_ARTIFACT_STORE", "to": "F11_LARGE_LOG_INSPECTOR_UI", "relation": "enables" },
+    { "from": "F10_TIMELINE_AND_CONTROL_UI", "to": "F11_LARGE_LOG_INSPECTOR_UI", "relation": "enables" },
+    { "from": "F09_SESSION_SIDEBAR_UI", "to": "F12_E2E_VERIFICATION_SUITE", "relation": "enables" },
+    { "from": "F10_TIMELINE_AND_CONTROL_UI", "to": "F12_E2E_VERIFICATION_SUITE", "relation": "enables" },
+    { "from": "F11_LARGE_LOG_INSPECTOR_UI", "to": "F12_E2E_VERIFICATION_SUITE", "relation": "enables" }
+  ]
+}

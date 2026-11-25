@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+export const DEFAULT_ALLOWED_TRACE_ROOTS = './data/fixtures,../Database/new data';
+
+export function splitAllowedTraceRoots(raw: string): string[] {
+  return [...new Set(raw.split(',').map((path) => path.trim()).filter(Boolean))];
+}
+
 const PortSchema = z
   .union([z.number(), z.string().regex(/^\d+$/).transform(Number)])
   .pipe(z.number().int().min(1).max(65535));
@@ -11,6 +17,10 @@ const EnvSchema = z.object({
   LLM_API_KEY: z.string().min(1).optional(),
   TOOL_MODE: z.enum(['mock', 'live']).default('mock'),
   DB_PATH: z.string().min(1).default('./data/agent-run.db'),
+  ALLOWED_TRACE_ROOTS: z.string().default(DEFAULT_ALLOWED_TRACE_ROOTS).refine(
+    (value) => splitAllowedTraceRoots(value).length > 0,
+    { message: 'ALLOWED_TRACE_ROOTS must contain at least one non-empty path.' },
+  ),
 });
 
 export const ENV_KEYS = EnvSchema.keyof().options;

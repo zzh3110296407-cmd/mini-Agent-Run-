@@ -2,7 +2,7 @@ import { APP_NAME, HealthResponseSchema } from '@mini-agent-run/shared';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
-import { parseEnv } from '../src/config/env.js';
+import { DEFAULT_ALLOWED_TRACE_ROOTS, parseEnv, splitAllowedTraceRoots } from '../src/config/env.js';
 import { checkSqliteSmoke } from '../src/db/smoke.js';
 
 describe('M0 SQLite and health probes', () => {
@@ -28,7 +28,13 @@ describe('M0 SQLite and health probes', () => {
 
 describe('M0 environment configuration', () => {
   it('defaults to local mock mode without requiring model credentials', () => {
-    expect(parseEnv({})).toEqual({ PORT: 3001, TOOL_MODE: 'mock', DB_PATH: './data/agent-run.db' });
+    expect(parseEnv({})).toEqual({
+      PORT: 3001,
+      TOOL_MODE: 'mock',
+      DB_PATH: './data/agent-run.db',
+      ALLOWED_TRACE_ROOTS: DEFAULT_ALLOWED_TRACE_ROOTS,
+    });
+    expect(DEFAULT_ALLOWED_TRACE_ROOTS).toBe('./data/fixtures,../Database/new data');
   });
 
   it('accepts process-style strings and keeps the supplied model configuration', () => {
@@ -39,8 +45,18 @@ describe('M0 environment configuration', () => {
       LLM_API_KEY: 'test-key',
       TOOL_MODE: 'live',
       DB_PATH: './data/test.db',
+      ALLOWED_TRACE_ROOTS: './data/sample,../Database/new data',
     };
     expect(parseEnv({ ...values, PATH: 'unrelated' })).toEqual({ ...values, PORT: 65535 });
+  });
+
+  it('splits and deduplicates trace roots in order while retaining internal spaces', () => {
+    expect(splitAllowedTraceRoots(' ./data/fixtures, , ../Database/new data, ./data/fixtures, ./other ,'))
+      .toEqual(['./data/fixtures', '../Database/new data', './other']);
+  });
+
+  it.each(['', ' , , '])('rejects an empty trace-root list %j', (ALLOWED_TRACE_ROOTS) => {
+    expect(() => parseEnv({ ALLOWED_TRACE_ROOTS })).toThrow('must contain at least one non-empty path');
   });
 
   it.each(['0', '65536', '2.5', '', '0x10', true, null])('rejects the invalid port %s', (PORT) => {

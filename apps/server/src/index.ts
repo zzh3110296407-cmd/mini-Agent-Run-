@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config } from 'dotenv';
 import { buildApp } from './app.js';
-import { parseEnv } from './config/env.js';
+import { parseEnv, splitAllowedTraceRoots } from './config/env.js';
 
 const envPath = fileURLToPath(new URL('../../../.env', import.meta.url));
 if (existsSync(envPath)) {
@@ -10,8 +10,8 @@ if (existsSync(envPath)) {
   if (error) throw error;
 }
 
-const { PORT } = parseEnv(process.env);
-const app = buildApp();
+const env = parseEnv(process.env);
+const app = buildApp({ allowedTraceRoots: splitAllowedTraceRoots(env.ALLOWED_TRACE_ROOTS) });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
@@ -23,7 +23,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 }
 
 try {
-  const address = await app.listen({ host: '127.0.0.1', port: PORT });
+  const address = await app.listen({ host: '127.0.0.1', port: env.PORT });
   console.log(`Server listening at ${address}`);
 } catch (error) {
   console.error(error);
