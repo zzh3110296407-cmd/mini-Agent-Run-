@@ -214,6 +214,47 @@ describe('[F04_LARGE_ARTIFACT_STORE] SQLite persistence, HTTP and tool slice coo
       }
     }));
 
+  it.each([100, 101, 1024])('applies the Artifact error contract to %i-character IDs', async (length) => {
+    const app = buildApp();
+    try {
+      const suffix = 'a'.repeat(length - 4);
+      const valid = 'art_' + suffix;
+      const invalid = 'bad_' + suffix;
+      expect(ArtifactMetaSchema.shape.id.safeParse(valid).success).toBe(true);
+      expect(ArtifactMetaSchema.shape.id.safeParse(invalid).success).toBe(false);
+      const missing = await app.inject('/api/artifacts/' + valid);
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json().error.code).toBe('ARTIFACT_NOT_FOUND');
+      const malformed = await app.inject('/api/artifacts/' + invalid);
+      expect(malformed.statusCode).toBe(400);
+      expect(malformed.json().error.code).toBe('INVALID_REQUEST');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps Artifact IDs single-segment and preserves the session route parameter limit', async () => {
+    const app = buildApp();
+    try {
+      const longId = 'art_' + 'a'.repeat(97);
+      const encodedSlash = await app.inject('/api/artifacts/' + longId + '%2Fextra?q=a/b');
+      expect(encodedSlash.statusCode).toBe(400);
+      expect(encodedSlash.json().error.code).toBe('INVALID_REQUEST');
+      const nested = await app.inject('/api/artifacts/' + longId + '/extra');
+      expect(nested.statusCode).toBe(404);
+      expect(nested.json().error).toBe('Not Found');
+      const empty = await app.inject('/api/artifacts/');
+      expect(empty.statusCode).toBe(400);
+      expect(empty.json().error.code).toBe('INVALID_REQUEST');
+      expect((await app.inject('/api/artifacts')).statusCode).toBe(404);
+      const session = await app.inject('/api/sessions/ses_' + 'a'.repeat(97) + '/file-slice');
+      expect(session.statusCode).toBe(414);
+      expect(session.json().code).toBe('FST_ERR_MAX_PARAM_LENGTH');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('offloads real search JSON, returns the bounded tool prefix and follows a source coordinate after exact HTTP readback', () =>
     withDatabase(async (dbPath) => {
       const file = 'noisy-large-xss.log';
