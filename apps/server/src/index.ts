@@ -18,6 +18,8 @@ const dbPath = env.DB_PATH === ':memory:' ? env.DB_PATH : resolve(WORKSPACE_ROOT
 try {
   const { app, address } = await startServer({
     dbPath, port: env.PORT, allowedTraceRoots: splitAllowedTraceRoots(env.ALLOWED_TRACE_ROOTS),
+    toolMode: env.TOOL_MODE,
+    llmConfig: { baseUrl: env.LLM_BASE_URL, model: env.LLM_MODEL, apiKey: env.LLM_API_KEY, providerName: 'deepseek' },
   });
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
