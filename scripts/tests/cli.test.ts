@@ -222,3 +222,27 @@ describe('G06-08 graph CLI in a Git repository', () => {
     });
   }, ['.npmrc', 'scripts/cli/index.mjs']), 12000);
 });
+
+describe('M2.3 llm-smoke offline CLI contract', () => {
+  it.concurrent('lists llm-smoke in help and rejects unsupported flags', async () => {
+    const [help, invalid] = await Promise.all([
+      invoke('llm-smoke', ['--help']), invoke('llm-smoke', ['--path', '.']),
+    ]);
+    expect(help.status).toBe(0);
+    expect(help.stderr).toBe('');
+    expect(help.stdout).toContain('tools-smoke|llm-smoke');
+    expect(invalid.status).toBe(1);
+    expect(invalid.stdout).toBe('');
+    expect(invalid.stderr).toContain('Usage:');
+  });
+
+  it.concurrent('rejects the placeholder before constructing a provider or starting a network request', async () => {
+    const result = await invoke('llm-smoke', ['--json'], undefined, {
+      LLM_API_KEY: 'your_api_key_here', LLM_BASE_URL: 'http://127.0.0.1:1', LLM_MODEL: 'fixture',
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: 'LLM_NOT_CONFIGURED' });
+    expect(result.stdout).not.toContain('your_api_key_here');
+  });
+});

@@ -8,7 +8,7 @@ import { printGuardrails, runGraph, runGuardrails } from '../check-guardrails.mj
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
-const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph|tools-smoke> [--path <dir>] [--json|--help]';
+const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph|tools-smoke|llm-smoke> [--path <dir>] [--json|--help]';
 
 function envCheck() {
   const exists = (file) => existsSync(join(root, file));
@@ -57,12 +57,18 @@ async function toolsSmoke(path) {
   return runToolsSmoke(root, path);
 }
 
+async function llmSmoke() {
+  const { runLlmSmoke } = await import('./llm-smoke.mjs');
+  return runLlmSmoke(root, buildPackages);
+}
+
 const commands = new Map([
   ['env-check', envCheck],
   ['guardrails', runGuardrails],
   ['smoke', smoke],
   ['graph', runGraph],
   ['tools-smoke', toolsSmoke],
+  ['llm-smoke', llmSmoke],
 ]);
 
 function printGraph(result) {
@@ -99,6 +105,9 @@ function printResult(command, result, json) {
   } else if (command === 'tools-smoke') {
     console.log('PASS tools-smoke | ' + result.artifactSource + ' | '
       + result.rawBytes + ' raw bytes | ' + result.summaryBytes + ' summary bytes | cascade cleared');
+  } else if (command === 'llm-smoke') {
+    if (result.ok) console.log('PASS llm-smoke | ' + result.provider + ' | ' + result.model + ' | ' + result.reply);
+    else console.error(result.error);
   } else {
     console.log('PASS GET /api/health HTTP ' + result.statusCode + ' | SQLite ' + result.health.sqlite);
   }
