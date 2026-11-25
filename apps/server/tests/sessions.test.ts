@@ -356,6 +356,39 @@ describe('[F02_SESSION_WORKSPACE] persistent sessions and scoped file slices', (
     }
   });
 
+  it('orders alternating creates and renames within the same millisecond', async () => {
+    const app = openTestApp();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(createdAt));
+    try {
+      const first = await create(app, directoryA, 'A');
+      const renameFirst = async (title: string) => {
+        const response = await app.inject({
+          method: 'PATCH', url: sessionsUrl + '/' + first.id, payload: { title },
+        });
+        expect(response.statusCode, response.body).toBe(200);
+        return SessionSchema.parse(response.json());
+      };
+      const listIds = async () => {
+        const response = await app.inject(sessionsUrl);
+        expect(response.statusCode, response.body).toBe(200);
+        return SessionListItemSchema.array().parse(response.json().sessions).map(({ id }) => id);
+      };
+
+      const firstRename = await renameFirst('A-1');
+      const second = await create(app, directoryB, 'B');
+      expect(second.createdAt).toBe(createdAt);
+      expect(await listIds()).toEqual([second.id, first.id]);
+      expect(Date.parse(second.updatedAt)).toBeGreaterThan(Date.parse(firstRename.updatedAt));
+
+      const secondRename = await renameFirst('A-2');
+      expect(await listIds()).toEqual([first.id, second.id]);
+      expect(Date.parse(secondRename.updatedAt)).toBeGreaterThan(Date.parse(second.updatedAt));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('blocks deleting an active session and cascades database rows with the trace bytes intact', async () => {
     const app = openTestApp();
     const session = await create(app, directoryA);

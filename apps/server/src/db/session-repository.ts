@@ -11,6 +11,13 @@ const sessionFields = `
   created_at AS createdAt, updated_at AS updatedAt
 `;
 
+// Allocate activity time within each write so creates and renames follow the latest stored activity.
+const nextActivityTime = `
+  max(@now, coalesce((
+    SELECT strftime('%Y-%m-%dT%H:%M:%fZ', max(updated_at), '+0.001 seconds') FROM sessions
+  ), @now))
+`;
+
 type RunRow = Omit<InvestigationRun, 'conclusion'> & { conclusion: string | null };
 
 export function deriveAutoSessionTitle(realPath: string) {
@@ -20,13 +27,14 @@ export function deriveAutoSessionTitle(realPath: string) {
 export function createSession(
   db: Database.Database, { targetPath, pathType, title }: Pick<Session, 'targetPath' | 'pathType'> & { title?: string },
 ) {
-  const timestamp = new Date().toISOString();
   const row = db.prepare(`
     INSERT INTO sessions (id, title, title_source, target_path, path_type, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (@id, @title, @titleSource, @targetPath, @pathType, @now, ${nextActivityTime})
     RETURNING ${sessionFields}
-  `).get('ses_' + randomUUID(), title ?? deriveAutoSessionTitle(targetPath), title === undefined ? 'auto' : 'manual',
-    targetPath, pathType, timestamp, timestamp);
+  `).get({
+    id: 'ses_' + randomUUID(), title: title ?? deriveAutoSessionTitle(targetPath),
+    titleSource: title === undefined ? 'auto' : 'manual', targetPath, pathType, now: new Date().toISOString(),
+  });
   return SessionSchema.parse(row);
 }
 
@@ -74,9 +82,7 @@ export function getSessionDetail(db: Database.Database, sessionId: string) {
 export function renameSession(db: Database.Database, sessionId: string, title: string): Session | null {
   const row = db.prepare(`
     UPDATE sessions
-    SET title = @title, title_source = 'manual',
-        updated_at = max(@now, (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', max(updated_at), '+0.001 seconds')
-          FROM sessions))
+    SET title = @title, title_source = 'manual', updated_at = ${nextActivityTime}
     WHERE id = @sessionId
     RETURNING ${sessionFields}
   `).get({ title, now: new Date().toISOString(), sessionId });
