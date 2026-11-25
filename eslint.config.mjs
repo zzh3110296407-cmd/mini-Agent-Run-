@@ -8,7 +8,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 import { workspaceDependencies, workspaceDirectory, workspaceName } from './scripts/lib/workspace-dag.mjs';
 
-const BANNED_IMPORTS = [];
+const BANNED_IMPORTS = ['bombadil', '@antithesishq/bombadil'];
 const BANNED_SYNTAX = [];
 const RUNTIME_FILES = ['apps/server/src/runtime/**/*.{js,mjs,cjs,ts,mts,cts}'];
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -207,15 +207,8 @@ export default [
     files: ['packages/shared/**/*.{ts,mts,cts,tsx}'],
     rules: { 'no-restricted-globals': ['error', 'process', 'Buffer'] },
   },
-  {
-    files: ['**/*.{js,mjs,cjs,ts,mts,cts,vue}'],
-    rules: {
-      'no-restricted-imports': ['error', {
-        patterns: importPatterns([]).map((regex) => ({ regex })),
-      }],
-      'no-restricted-syntax': ['error', ...BANNED_SYNTAX],
-    },
-  },
+  boundary(['**/*.{js,mjs,cjs,ts,mts,cts,vue}'], [], [],
+    'Use the supported local UI exploration tooling.'),
   ...workspaces.map((name) => boundary(
     [workspaceFiles(name)],
     [...externalRestrictions[name], ...blockedWorkspaceImports(name)],

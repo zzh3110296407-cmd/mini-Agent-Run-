@@ -92,6 +92,19 @@ describe('M0 ESLint guardrails', () => {
 
 const template = ENV_KEYS.map((key) => key + '=placeholder').join('\n');
 
+describe('M4 Bombadil circuit breaker', () => {
+  it('blocks both package names in static and dynamic imports across app and script code', async () => {
+    for (const file of ['apps/web/src/bombadil-control.ts', 'scripts/bombadil-control.mjs']) {
+      for (const name of ['bombadil', '@antithesishq/bombadil']) {
+        const specifier = JSON.stringify(name);
+        expect(await lintRuleIds(file, 'import ' + specifier + ';')).toEqual(['no-restricted-imports']);
+        expect(await lintRuleIds(file, 'void import(' + specifier + ');')).toEqual(['no-restricted-syntax']);
+      }
+    }
+    expect(await lintRuleIds('scripts/ui-control.mjs', "void import('playwright');")).toEqual([]);
+  });
+});
+
 describe('M1.1 G-03 workspace boundaries', () => {
   const ruleIds = new Set(['no-restricted-imports', 'no-restricted-syntax', 'workspace/package-dag',
     'workspace/runtime-boundary']);
