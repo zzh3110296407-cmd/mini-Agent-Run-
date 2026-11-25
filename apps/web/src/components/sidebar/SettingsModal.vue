@@ -54,7 +54,7 @@ function clear() {
     <template #footer>
       <UiButton variant="ghost" data-testid="clear-api-key-btn" :disabled="!hasCustomApiKey" @click="clear">清除并恢复默认</UiButton>
       <UiButton
-        variant="primary" type="submit" :form="inputId + '-form'" data-testid="save-api-key-btn" :disabled="!canSave"
+        variant="primary" type="submit" :form="inputId + '-form'" data-testid="save-api-key-btn" :disabled="!canSave" @click.prevent="save"
       >保存</UiButton>
     </template>
   </UiDialog>
