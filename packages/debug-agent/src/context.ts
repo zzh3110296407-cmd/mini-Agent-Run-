@@ -164,7 +164,9 @@ export function createDebugContextTransform({
         const message = current[foldedThrough];
         if (message?.role !== 'toolResult') continue;
         const content = foldedContent(message);
-        total += estimateTokenCount(content) - estimateTokenCount(message.content);
+        const saving = estimateTokenCount(message.content) - estimateTokenCount(content);
+        if (saving <= 0) continue;
+        total -= saving;
         current[foldedThrough] = { ...message, content };
       }
     }

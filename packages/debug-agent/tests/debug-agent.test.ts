@@ -62,6 +62,30 @@ function prior(id: string, status: PriorSessionRun['status'], overrides: Partial
   };
 }
 
+function tightBudgetFixture() {
+  const systemPrompt = '离线复核。';
+  const prompt = '排查原因。';
+  const shortened = '排查原因';
+  const tool = {
+    name: 'lookup', description: 'Find a trace record.',
+    parameters: { type: 'object', properties: { query: { type: 'string' } } },
+    execute: vi.fn(async () => ({ isError: false, content: 'OK' })),
+  };
+  const lookup = call('ping', 'lookup', { query: '' });
+  const witness: AgentMessage[] = [
+    user('budget_question', shortened),
+    assistant('budget_latest', '', [lookup]),
+    { id: 'msg_budget_result', role: 'toolResult', toolCallId: lookup.id, toolName: lookup.name,
+      isError: false, durationMs: 0, content: 'OK', createdAt: at },
+  ];
+  const fixedOverheadTokens = estimatePromptAndToolsTokens(systemPrompt, [tool]);
+  lookup.arguments.query = '核'.repeat(420 - fixedOverheadTokens - estimateMessagesTokens(witness));
+  expect(fixedOverheadTokens).toBe(55);
+  expect(fixedOverheadTokens + estimateMessagesTokens(witness)).toBe(420);
+  const input = [user('budget_question', prompt), ...witness.slice(1)];
+  return { systemPrompt, prompt, shortened, tool, lookup, witness, input, fixedOverheadTokens };
+}
+
 function assertToolPairing(messages: readonly AgentMessage[]) {
   let pending = new Set<string>();
   for (const message of messages) {
@@ -154,6 +178,20 @@ describe('[F05_MULTI_TURN_INVESTIGATION] session history and protocol-safe conte
     expect(result.every(({ content }) => !loneSurrogate.test(content))).toBe(true);
     expect(estimateMessagesTokens(result) + 70).toBeLessThanOrEqual(700);
     assertToolPairing(result);
+  });
+
+  it.each([false, true])('fits a short tool result at the 420-token hard cap (older history: %s)', async (withHistory) => {
+    const { input, witness, fixedOverheadTokens } = tightBudgetFixture();
+    expect(fixedOverheadTokens + estimateMessagesTokens(input)).toBe(421);
+    const messages = withHistory
+      ? [user('previous_q', 'Earlier question'), assistant('previous_a', 'Earlier answer'),
+        ...input.slice(0, 1), ...toolTurn('earlier_step', ['已核对'.repeat(100)]), ...input.slice(1)]
+      : input;
+    const output = await createDebugContextTransform({ contextWindowTokens: 600, fixedOverheadTokens })(messages);
+    expect(output).toEqual(witness);
+    expect(fixedOverheadTokens + estimateMessagesTokens(output)).toBe(420);
+    expect(input[0]?.content).toBe('排查原因。');
+    assertToolPairing(output);
   });
 
   it('rejects invalid budgets and a latest tool structure that cannot fit without losing pairing', () => {
@@ -329,6 +367,25 @@ function debugFixture() {
 }
 
 describe('[F05_MULTI_TURN_INVESTIGATION] offline debug investigations', () => {
+  it('makes the second model request when a short result leaves the context one token over budget', async () => {
+    const { systemPrompt, prompt, shortened, lookup, tool } = tightBudgetFixture();
+    const fixture = debugFixture();
+    const provider = createMockLLMProvider({ turns: [{ toolCalls: [lookup] }, { text: 'Done.' }] });
+    const result = await runDebugInvestigation({
+      ...fixture.input, systemPrompt, prompt, tools: [tool], provider, model: 'fixture', contextWindowTokens: 600,
+    });
+    expect(result).toMatchObject({ state: { status: 'completed', step: 2 }, finalAnswer: 'Done.', conclusion: null });
+    expect(tool.execute).toHaveBeenCalledOnce();
+    expect(fixture.save).not.toHaveBeenCalled();
+    expect(provider.recordedRequests).toHaveLength(2);
+    expect(provider.recordedRequests[1]?.messages).toEqual([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: shortened },
+      { role: 'assistant', content: '', toolCalls: [lookup] },
+      { role: 'tool', content: 'OK', name: lookup.name, toolCallId: lookup.id },
+    ]);
+  });
+
   it('runs real tools, offloads a large search result, reads the Artifact and answers with a structured conclusion', async () => {
     const { tools, save, readSlice, input } = debugFixture();
     const artifactId = 'art_memory_0';
