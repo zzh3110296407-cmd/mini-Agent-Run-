@@ -81,10 +81,14 @@ function toolTurns(messages: readonly AgentMessage[]): ToolTurn[] {
   return turns;
 }
 
+function artifactPointer(artifactId: string): string {
+  return `artifactId=${artifactId}`;
+}
+
 function foldedContent(message: ToolResult): string {
   const tool = truncateUtf8Safe(message.toolName, 120).text;
   const status = message.isError ? 'error' : 'ok';
-  const pointer = message.artifactId ? `; artifactId=${message.artifactId}; use read_artifact_slice to inspect` : '';
+  const pointer = message.artifactId ? `; ${artifactPointer(message.artifactId)}; use read_artifact_slice to inspect` : '';
   return `[Folded earlier tool result from ${tool} (${status})${pointer}]`;
 }
 
@@ -115,17 +119,28 @@ function fitText(messages: readonly AgentMessage[], budget: number): AgentMessag
     available -= message.role === 'toolResult' ? estimateMessageTokens(message)
       : estimateMessageTokens({ ...message, content: '' });
   }
-  if (available < 0) throw new RangeError('The required message structure exceeds the context hard cap.');
-
-  // Keep the current question first, then as much recent assistant text as the budget permits.
   const order = messages.map((_, index) => index).reverse();
   const question = order.find((index) => messages[index]?.role === 'user');
+  const minimum = question !== undefined && messages[question]?.content ? 1 : 0;
+  // Before rejecting the retained structure or emptying the question, try the complete Artifact pointers.
+  for (const [index, message] of output.entries()) {
+    if (available >= minimum) break;
+    if (message.role !== 'toolResult' || !message.artifactId) continue;
+    const content = artifactPointer(message.artifactId);
+    const saving = estimateTokenCount(message.content) - estimateTokenCount(content);
+    if (saving <= 0) continue;
+    output[index] = { ...message, content };
+    available += saving;
+  }
+  if (available < minimum) throw new RangeError('The required message structure exceeds the context hard cap.');
+
+  // Keep the current question first, then as much recent assistant text as the budget permits.
   if (question !== undefined) {
     order.splice(order.indexOf(question), 1);
     order.unshift(question);
   }
   for (const index of order) {
-    const message = messages[index];
+    const message = output[index];
     if (!message || message.role === 'toolResult') continue;
     const tokens = estimateTokenCount(message.content);
     if (tokens > available) {
@@ -177,7 +192,7 @@ export function createDebugContextTransform({
           const { artifactId } = message;
           if (!artifactId || containsArtifactId(message.content, artifactId)) continue;
           // The model projection only sees the tool result body.
-          content = `artifactId=${artifactId}`;
+          content = artifactPointer(artifactId);
           tokens = estimateTokenCount(content);
         }
         total += tokens - originalTokens;

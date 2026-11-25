@@ -207,6 +207,22 @@ describe('[F05_MULTI_TURN_INVESTIGATION] session history and protocol-safe conte
     assertToolPairing(output);
   });
 
+  it('tries compact Artifact pointers when the retained tool bodies leave no room for the question', async () => {
+    const turn = toolTurn('tight_pointers', [
+      'Saved matching trace lines; artifactId=art_tight_pointers_0',
+      'Saved matching trace lines; artifactId=art_tight_pointers_1',
+    ]);
+    const input = [user('limited_question', '请定位'), ...turn];
+    const fixedOverheadTokens = 420 - estimateMessagesTokens([user('limited_question', ''), ...turn]);
+    const output = await createDebugContextTransform({ contextWindowTokens: 600, fixedOverheadTokens })(input);
+    expect(output[0]).toEqual(input[0]);
+    expect(output[1]).toEqual(input[1]);
+    expect(output[2]).toMatchObject({ content: 'artifactId=art_tight_pointers_0', artifactId: 'art_tight_pointers_0' });
+    expect(output[3]).toEqual(input[3]);
+    expect(fixedOverheadTokens + estimateMessagesTokens(output)).toBeLessThanOrEqual(420);
+    assertToolPairing(output);
+  });
+
   it('rejects invalid budgets and a latest tool structure that cannot fit without losing pairing', () => {
     for (const settings of [
       { contextWindowTokens: 0 }, { triggerRatio: 0.8 }, { hardCapRatio: 1 },
@@ -474,6 +490,79 @@ describe('[F05_MULTI_TURN_INVESTIGATION] offline debug investigations', () => {
     const readback = result.state.messages.find((message) => message.role === 'toolResult' && message.toolCallId === 'tc_read');
     expect(JSON.parse(readback?.content ?? '')).toMatchObject({ lines: [{ lineNumber: 1, text: evidence }] });
   });
+
+  it.each(['metadata-only', 'already-in-body', 'auto-offload'] as const)(
+    'uses a complete Artifact pointer and reads the saved log at exactly 420 tokens (%s)', async (mode) => {
+      const { tools, save, readSlice, input } = debugFixture();
+      const reader = tools.find(({ name }) => name === 'read_artifact_slice');
+      if (!reader) throw new Error('Expected the real Artifact reader.');
+      const firstLine = 'INFO captured evidence from step 1.';
+      const evidence = Array.from({ length: 210 }, () => firstLine).join('\n');
+      expect(Buffer.byteLength(evidence)).toBe(7559);
+      const capture: AgentTool = {
+        name: 'capture_log', description: 'Save the matched trace lines.',
+        parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+        async execute(_args, context) {
+          if (mode === 'auto-offload') return { content: evidence, isError: false };
+          if (!context.toolCallId) throw new Error('Expected a tool call ID.');
+          const { id } = await context.artifactStore.save({
+            runId: context.runId, sessionId: context.sessionId, toolCallId: context.toolCallId,
+            sourceTool: 'capture_log', title: 'Trace', contentType: 'text/plain',
+            content: evidence, summary: summarizeToolOutput(evidence),
+          });
+          const content = mode === 'metadata-only' ? 'OK' : 'Saved matching trace lines; artifactId=' + id;
+          return { artifactId: id, content, isError: false };
+        },
+      };
+      const systemPrompt = 'Inspect the trace.';
+      const available = [capture, reader];
+      const overhead = estimatePromptAndToolsTokens(systemPrompt, available);
+      const artifactId = 'art_memory_0';
+      const pointer = 'artifactId=' + artifactId;
+      const captureCall = call('capture', capture.name, { query: '' });
+      const witness: AgentMessage[] = [
+        user('tight_question', '请定位'),
+        assistant('tight_call', '', [captureCall]),
+        { id: 'msg_tight_result', role: 'toolResult', toolCallId: captureCall.id, toolName: capture.name,
+          artifactId, content: pointer, isError: false, durationMs: 0, createdAt: at },
+      ];
+      const remaining = 420 - overhead - estimateMessagesTokens(witness);
+      expect(remaining).toBeGreaterThan(0);
+      captureCall.arguments.query = '核'.repeat(remaining);
+      expect(overhead + estimateMessagesTokens(witness)).toBe(420);
+      const provider = createMockLLMProvider({ turns: (request, index) => {
+        if (index === 0) return { toolCalls: [captureCall] };
+        if (index === 1) {
+          const body = request.messages.find((message) => message.role === 'tool' && message.toolCallId === captureCall.id)?.content;
+          const id = /\bart_[A-Za-z0-9_-]+/.exec(body ?? '')?.[0];
+          return id ? { toolCalls: [call('read', reader.name, { artifactId: id, startLine: 1, limit: 1 })] }
+            : { text: 'Missing Artifact ID.' };
+        }
+        return { text: 'Done.' };
+      } });
+      const result = await runDebugInvestigation({
+        ...input, prompt: '请定位原因并引用这条记录。', systemPrompt, tools: available, provider,
+        model: 'fixture', contextWindowTokens: 600, maxSteps: 3,
+      });
+      expect(result).toMatchObject({ state: { status: 'completed', step: 3 }, finalAnswer: 'Done.' });
+      expect(provider.recordedRequests).toHaveLength(3);
+      expect(provider.recordedRequests[1]?.messages).toEqual([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: '请定位' },
+        { role: 'assistant', content: '', toolCalls: [captureCall] },
+        { role: 'tool', content: pointer, name: capture.name, toolCallId: captureCall.id },
+      ]);
+      expect(overhead + estimateMessagesTokens(result.state.messages.slice(0, 3))).toBeGreaterThan(420);
+      expect(save).toHaveBeenCalledOnce();
+      expect(save.mock.calls[0]?.[0].content).toBe(evidence);
+      const rawToolBody = result.state.messages[2]?.content ?? '';
+      if (mode === 'auto-offload') expect(JSON.parse(rawToolBody)).toMatchObject({ artifactId, truncatedForLlm: true });
+      else expect(Buffer.byteLength(rawToolBody)).toBe(mode === 'metadata-only' ? 2 : 51);
+      expect(readSlice).toHaveBeenCalledExactlyOnceWith(artifactId, { offsetLine: 1, limit: 1, level: undefined, query: undefined });
+      const readback = result.state.messages.find((message) => message.role === 'toolResult' && message.toolCallId === 'tc_read');
+      expect(JSON.parse(readback?.content ?? '')).toMatchObject({ lines: [{ lineNumber: 1, text: firstLine }] });
+    },
+  );
 
   it('runs real tools, offloads a large search result, reads the Artifact and answers with a structured conclusion', async () => {
     const { tools, save, readSlice, input } = debugFixture();
