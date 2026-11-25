@@ -9,6 +9,8 @@ export interface RecordLocation {
   line?: number;
 }
 
+export type JsonPath = readonly (string | number)[];
+
 interface Sanitized {
   ok: true;
   sanitized: string;
@@ -23,13 +25,12 @@ interface Sanitized {
   };
 }
 
-function scrubDocument(source: string, evidenceField?: string) {
+function scrubDocument(source: string, evidencePath?: JsonPath) {
   const parsed: unknown = JSON.parse(source);
   const masks: RecordLocation[] = [];
   const locations: NonNullable<Sanitized['locations']> = {};
   let position = 0;
-  let recordValueStart: number | undefined;
-  let eventValueStart: number | undefined;
+  let evidenceOffset: number | undefined;
 
   function skipSpace() {
     while (position < source.length && ' \t\r\n'.includes(source.charAt(position))) position++;
@@ -44,9 +45,10 @@ function scrubDocument(source: string, evidenceField?: string) {
     }
   }
 
-  function scanValue(visible: boolean, records?: RecordLocation[], root = false, event = false) {
+  function scanValue(visible: boolean, records?: RecordLocation[], root = false, depth = -1) {
     skipSpace();
     const start = position;
+    if (visible && depth === evidencePath?.length) evidenceOffset = start;
     const character = source.charAt(position);
     if (character === '{') {
       position++;
@@ -75,13 +77,10 @@ function scrubDocument(source: string, evidenceField?: string) {
           childRecords = source.charAt(position) === '[' ? [] : undefined;
           locations[key] = childRecords;
         }
-        const isEvent = evidenceField !== undefined && root && key === 'event';
-        if (isEvent) eventValueStart = undefined;
-        if (key === evidenceField && visible && !remove) {
-          if (root) recordValueStart = position;
-          if (event) eventValueStart = position;
-        }
-        scanValue(visible && !remove, childRecords, false, isEvent);
+        const childDepth = evidencePath?.[depth] === key ? depth + 1 : -1;
+        // A later member replaces the previous subtree at the same decoded key.
+        if (childDepth !== -1) evidenceOffset = undefined;
+        scanValue(visible && !remove, childRecords, false, childDepth);
         skipSpace();
         if (source.charAt(position) === ',') {
           previousComma = position++;
@@ -93,9 +92,10 @@ function scrubDocument(source: string, evidenceField?: string) {
     } else if (character === '[') {
       position++;
       skipSpace();
-      while (source.charAt(position) !== ']') {
+      for (let index = 0; source.charAt(position) !== ']'; index++) {
         const itemStart = position;
-        scanValue(visible);
+        const childDepth = evidencePath?.[depth] === index ? depth + 1 : -1;
+        scanValue(visible, undefined, false, childDepth);
         records?.push({ start: itemStart, end: position });
         skipSpace();
         if (source.charAt(position) === ',') {
@@ -114,8 +114,7 @@ function scrubDocument(source: string, evidenceField?: string) {
 
   // Scan source keys individually because JSON.parse collapses duplicate members.
   if (Array.isArray(parsed)) locations.records = [];
-  scanValue(true, locations.records, true);
-  const evidenceOffset = eventValueStart ?? recordValueStart;
+  scanValue(true, locations.records, true, evidencePath ? 0 : -1);
   if (masks.length === 0) return { parsed, text: source, stripped: false, locations, evidenceOffset };
   const chunks: string[] = [];
   let previous = 0;
@@ -127,8 +126,8 @@ function scrubDocument(source: string, evidenceField?: string) {
   return { parsed: JSON.parse(text) as unknown, text, stripped: true, locations, evidenceOffset };
 }
 
-export function traceFieldValueOffset(sanitizedRecord: string, field: string) {
-  return scrubDocument(sanitizedRecord, field).evidenceOffset;
+export function traceValueOffset(sanitizedRecord: string, path: JsonPath) {
+  return scrubDocument(sanitizedRecord, path).evidenceOffset;
 }
 
 export function* traceLines(content: string) {

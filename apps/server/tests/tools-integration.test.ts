@@ -149,6 +149,39 @@ describe('server session trace workspace integration', () => {
     });
   });
 
+  it('locates the multiline nested tool error at the same original line as search and the HTTP slice', async () => {
+    await withFixture(async (temp) => {
+      const file = 'call-split.json';
+      const lines = [
+        '{', '  "metadata": {"annotation":"private fixture"},', '  "steps": [', '    {', '      "step": 6,',
+        '      "toolCalls": [', '        {', '          "name": "lookup",', '          "isError":', '            true',
+        '        }', '      ]', '    }', '  ]', '}',
+      ];
+      fs.writeFileSync(join(temp, file), lines.join('\r\n'));
+      const app = buildApp({ allowedTraceRoots: [temp] });
+      try {
+        const session = await bind(app, temp);
+        const run = runner(session, [temp]);
+        const inspection = await run('inspect_trace', { file });
+        const found = await run('search_logs', { file, query: 'true' });
+        expect(found.data.matches).toMatchObject([{ lineNumber: 10, text: lines[9] }]);
+        const tool = await run('read_file_slice', { file, startLine: 10, limit: 1 });
+        const response = await app.inject('/api/sessions/' + session.id + '/file-slice?' +
+          new URLSearchParams({ file, startLine: '10', limit: '1' }).toString());
+        expect(response.statusCode).toBe(200);
+        const originalLine = TextSliceResponseSchema.parse(response.json()).lines[0];
+        expect(originalLine).toMatchObject({ lineNumber: 10, text: lines[9] });
+        expect(tool.data.lines).toEqual([originalLine]);
+        expect(inspection.content).not.toContain('private fixture');
+        const overview = TraceOverviewSchema.parse(inspection.data);
+        expect(overview.threeState).toMatchObject({ hasToolError: true, toolErrorCount: 1 });
+        expect(overview.anomalies.firstError).toEqual({ step: 6, line: 10, snippet: 'true' });
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
   it('lists bounded POSIX paths and rejects escapes and forbidden segments through the real sandbox', async () => {
     await withFixture(async (temp) => {
       const a = join(temp, 'a');

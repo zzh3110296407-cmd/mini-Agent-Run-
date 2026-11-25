@@ -148,6 +148,10 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
       ['failure.json', 'The operation could not complete.', true, 1],
       ['legacy-failure.json', 'ERROR unavailable', undefined, 1],
       ['structured-failure.json', '{"error":"unavailable"}', undefined, 1],
+      ['failed-status.json', '{"status":"error","message":"ERROR: lookup failed"}', undefined, 1],
+      ['status-only-failure.json', '{"status":"error"}', undefined, 1],
+      ['status-success.json', '{"status":"ok","message":"Checked prior ERROR records","error":null}', undefined, 0],
+      ['explicit-success.json', '{"status":"error","message":"ERROR: lookup failed"}', false, 0],
     ] as const;
     const { call } = build(Object.fromEntries(fixtures.map(([file, content, isError]) => [file, JSON.stringify({
       metadata: { dataset: 'trajerrbench', reward: 1 },
@@ -164,6 +168,9 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
       });
       if (count === 0) expect(overview.anomalies.firstError, file).toBeNull();
       else expect(overview.anomalies.firstError, file).toMatchObject({ step: 1 });
+      if (file === 'failed-status.json') {
+        expect(overview.anomalies.firstError).toMatchObject({ line: 16, snippet: expect.stringContaining('lookup failed') });
+      }
     }
   });
 
@@ -209,6 +216,21 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     ].join('\r\n');
     const overview = analyzeTraceContent('event.json', original);
     expect(overview.anomalies.firstError).toEqual({ step: 7, line: 9, snippet: '"error"' });
+  });
+
+  it('uses the effective failed call in a nested event array as first-error evidence', () => {
+    const original = [
+      '{', '  "steps": [{', '    "step": 7,', '    "event": {',
+      '      "tool_calls": [{ "name": "overwritten", "isError": true }],',
+      '      "tool_calls": [',
+      '        { "isError": true },',
+      '        { "name": "lookup", "isError": false, "is\\u0045rror":',
+      '            true',
+      '        }', '      ]', '    }', '  }]', '}',
+    ].join('\r\n');
+    const overview = analyzeTraceContent('event.json', original);
+    expect(overview.threeState).toMatchObject({ hasToolError: true, toolErrorCount: 1 });
+    expect(overview.anomalies.firstError).toEqual({ step: 7, line: 9, snippet: 'true' });
   });
 
   it('removes escaped and overwritten keys before every reading tool while retaining original positions', async () => {

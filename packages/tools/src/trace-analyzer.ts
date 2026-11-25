@@ -1,5 +1,5 @@
 import { TraceOverviewSchema, type LogLevel, type TraceOverview } from '@mini-agent-run/shared';
-import { sanitizeTraceContent, traceFieldValueOffset, traceLines, type RecordLocation } from './sanitize.js';
+import { sanitizeTraceContent, traceValueOffset, traceLines, type JsonPath, type RecordLocation } from './sanitize.js';
 import { ToolError } from './tool-error.js';
 
 type TraceObject = Record<string, unknown>;
@@ -132,7 +132,9 @@ function errorEvidenceField(row: TraceObject, body: string, bodyField: string | 
   if (first === '{' || first === '[') {
     try {
       const payload = asObject(JSON.parse(body));
-      return payload && recordedError(payload)?.failed ? bodyField : undefined;
+      if (!payload) return;
+      const failed = recordedError(payload)?.failed ?? /^(?:error|fatal|failed|failure)$/i.test(text(payload.status)?.trim() ?? '');
+      return failed ? bodyField : undefined;
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
     }
@@ -141,17 +143,19 @@ function errorEvidenceField(row: TraceObject, body: string, bodyField: string | 
 }
 
 function firstEvidence(
-  source: string, span: RecordLocation | undefined, record: TraceRecord, body: string, field: string | undefined,
+  source: string, span: RecordLocation | undefined, record: TraceRecord, body: string, paths: readonly JsonPath[],
 ) {
   if (span) {
     const block = source.slice(span.start, span.end);
-    const offset = field === undefined ? undefined : traceFieldValueOffset(block, field);
+    const event = asObject(asObject(record.value)?.event);
+    const offsets = paths.map((path) => {
+      const field = path[0];
+      return traceValueOffset(block, event && typeof field === 'string' && Object.hasOwn(event, field)
+        ? ['event', ...path] : path);
+    }).filter((offset) => offset !== undefined);
+    const firstOffset = Math.min(...offsets);
     for (const { line, start, end, text: snippet } of traceLines(block)) {
-      const hasEvidence = offset === undefined
-        ? structuredError.test(snippet) || /"error"\s*:\s*(?!null\b|false\b|""|$)\S/i.test(snippet)
-          || (body && strongError.test(body) && strongError.test(snippet))
-        : offset >= start && offset < end;
-      if (hasEvidence) {
+      if (firstOffset >= start && firstOffset < end) {
         return { step: record.step, line: record.line + line - 1, snippet: snippet.trim().slice(0, 240) };
       }
     }
@@ -213,13 +217,18 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
     const evidenceField = errorEvidenceField(row, body, bodyField);
     const failed = evidenceField !== undefined;
     const explicitResult = /(?:result|execution_end|completed|failed)$/.test(eventType ?? '') || row.role === 'tool';
-    const listed = Array.isArray(row.toolCalls) ? row.toolCalls : Array.isArray(row.tool_calls) ? row.tool_calls : [];
+    const callsField = Array.isArray(row.toolCalls) ? 'toolCalls' : 'tool_calls';
+    const listed = row[callsField];
     const namedCalls: { name: string; id?: string; failed: boolean }[] = [];
-    for (const call of listed) {
+    let failedCallIndex: number | undefined;
+    for (const [index, call] of (Array.isArray(listed) ? listed : []).entries()) {
       const data = asObject(call);
       const toolName = callName(data);
-      if (toolName) namedCalls.push({
-        name: toolName, id: firstText(data, ['id', 'toolCallId', 'tool_call_id']), failed: data?.isError === true,
+      if (!toolName) continue;
+      const callFailed = data?.isError === true;
+      if (callFailed) failedCallIndex ??= index;
+      namedCalls.push({
+        name: toolName, id: firstText(data, ['id', 'toolCallId', 'tool_call_id']), failed: callFailed,
       });
     }
     if (row.role === 'assistant' && namedCalls.length === 0) {
@@ -250,8 +259,11 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
       else unmatchedErrors++;
     }
     if (explicitResult && matchingResult) reported.add(matchingResult);
-    if (firstError === null && (failed || namedCalls.some((call) => call.failed))) {
-      firstError = firstEvidence(trace.sanitized, span, record, body, evidenceField);
+    if (firstError === null && (failed || failedCallIndex !== undefined)) {
+      const paths: JsonPath[] = [];
+      if (evidenceField !== undefined) paths.push([evidenceField]);
+      if (failedCallIndex !== undefined) paths.push([callsField, failedCallIndex, 'isError']);
+      firstError = firstEvidence(trace.sanitized, span, record, body, paths);
     }
 
     const terminalEvent = /^(?:run_end|agent_end|task_end|outcome|summary)$/.test(eventType ?? '');
