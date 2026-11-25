@@ -1,22 +1,35 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { config } from 'dotenv';
-import { tsImport } from 'tsx/esm/api';
+
+function configuredKey(value) {
+  const key = value?.trim();
+  return key && key !== 'your_api_key_here' ? key : undefined;
+}
 
 export async function runLlmSmoke(root, buildPackages) {
   const notConfigured = { ok: false, error: 'LLM_NOT_CONFIGURED' };
+  // dotenv leaves an explicitly set shell value in place.
+  const inheritedKey = process.env.LLM_API_KEY;
+  if (inheritedKey !== undefined && !configuredKey(inheritedKey)) return notConfigured;
+
   const envPath = join(root, '.env');
-  const { parseEnv } = await tsImport('../../apps/server/src/config/env.ts', import.meta.url);
   let env;
+  let key;
   try {
-    if (existsSync(envPath) && config({ path: envPath, quiet: true }).error) return notConfigured;
+    if (existsSync(envPath)) {
+      const { config } = await import('dotenv');
+      if (config({ path: envPath, quiet: true }).error) return notConfigured;
+    }
+    key = configuredKey(process.env.LLM_API_KEY);
+    if (!key) return notConfigured;
+    const { tsImport } = await import('tsx/esm/api');
+    const { parseEnv } = await tsImport('../../apps/server/src/config/env.ts', import.meta.url);
     env = parseEnv(process.env);
   } catch {
     return notConfigured;
   }
-  const key = env.LLM_API_KEY?.trim();
   const model = env.LLM_MODEL?.trim();
-  if (!key || key === 'your_api_key_here' || !env.LLM_BASE_URL || !model) return notConfigured;
+  if (!env.LLM_BASE_URL || !model) return notConfigured;
 
   buildPackages();
   const { createOpenAICompatibleProvider, LLMProviderError, redactSecret } = await import('@mini-agent-run/ai');

@@ -224,9 +224,12 @@ describe('G06-08 graph CLI in a Git repository', () => {
 });
 
 describe('M2.3 llm-smoke offline CLI contract', () => {
+  const smoke = (flags: string[], overrides: NodeJS.ProcessEnv = {}) =>
+    runNode(['scripts/cli/index.mjs', 'llm-smoke', ...flags], { env: { ...env, ...overrides } });
+
   it.concurrent('lists llm-smoke in help and rejects unsupported flags', async () => {
     const [help, invalid] = await Promise.all([
-      invoke('llm-smoke', ['--help']), invoke('llm-smoke', ['--path', '.']),
+      smoke(['--help']), smoke(['--path', '.']),
     ]);
     expect(help.status).toBe(0);
     expect(help.stderr).toBe('');
@@ -237,7 +240,7 @@ describe('M2.3 llm-smoke offline CLI contract', () => {
   });
 
   it.concurrent('rejects the placeholder before constructing a provider or starting a network request', async () => {
-    const result = await invoke('llm-smoke', ['--json'], undefined, {
+    const result = await smoke(['--json'], {
       LLM_API_KEY: 'your_api_key_here', LLM_BASE_URL: 'http://127.0.0.1:1', LLM_MODEL: 'fixture',
     });
     expect(result.status).toBe(1);

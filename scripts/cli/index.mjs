@@ -3,12 +3,11 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tsImport } from 'tsx/esm/api';
-import { printGuardrails, runGraph, runGuardrails } from '../check-guardrails.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
 const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph|tools-smoke|llm-smoke> [--path <dir>] [--json|--help]';
+const loadGuardrails = () => import('../check-guardrails.mjs');
 
 function envCheck() {
   const exists = (file) => existsSync(join(root, file));
@@ -34,6 +33,7 @@ function buildPackages() {
 
 async function smoke() {
   buildPackages();
+  const { tsImport } = await import('tsx/esm/api');
   const { buildApp } = await tsImport('../../apps/server/src/app.ts', import.meta.url);
   const { HealthResponseSchema } = await import('@mini-agent-run/shared');
   const app = buildApp();
@@ -64,14 +64,14 @@ async function llmSmoke() {
 
 const commands = new Map([
   ['env-check', envCheck],
-  ['guardrails', runGuardrails],
+  ['guardrails', async () => (await loadGuardrails()).runGuardrails()],
   ['smoke', smoke],
-  ['graph', runGraph],
+  ['graph', async () => (await loadGuardrails()).runGraph()],
   ['tools-smoke', toolsSmoke],
   ['llm-smoke', llmSmoke],
 ]);
 
-function printGraph(result) {
+async function printGraph(result) {
   if (!result.present) {
     console.log('SKIP Feature Graph is absent.');
     return;
@@ -87,16 +87,20 @@ function printGraph(result) {
   const { total, required, covered, missing, deferred } = result.summary;
   console.log('Feature Graph: ' + total + ' total, ' + required + ' required, ' + covered
     + ' covered, ' + missing + ' missing, ' + deferred + ' deferred.');
-  if (!result.ok) printGuardrails({ ...result, skipped: [] }, false);
+  if (!result.ok) {
+    const { printGuardrails } = await loadGuardrails();
+    printGuardrails({ ...result, skipped: [] }, false);
+  }
 }
 
-function printResult(command, result, json) {
+async function printResult(command, result, json) {
   if (command === 'guardrails') {
+    const { printGuardrails } = await loadGuardrails();
     printGuardrails(result, json);
   } else if (json) {
     console.log(JSON.stringify(result));
   } else if (command === 'graph') {
-    printGraph(result);
+    await printGraph(result);
   } else if (command === 'env-check') {
     for (const { name, ok, value } of result.checks) {
       console.log((ok ? 'PASS ' : 'FAIL ') + name + (value ? ' ' + value : ''));
@@ -144,7 +148,7 @@ if ((command === '--help' && flags.length === 0) || options?.format === '--help'
 
   try {
     const result = await run(options.path);
-    printResult(command, result, json);
+    await printResult(command, result, json);
     if (!result.ok) process.exitCode = 1;
   } catch (error) {
     if (json) {
