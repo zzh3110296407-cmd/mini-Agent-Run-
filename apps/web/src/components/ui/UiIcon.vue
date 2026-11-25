@@ -18,6 +18,7 @@ const paths = {
   search: ['M15.5 15.5 21 21M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z'],
   'chevron-right': ['m9 6 6 6-6 6'],
   'chevron-down': ['m6 9 6 6 6-6'],
+  'chevron-up': ['m6 15 6-6 6 6'],
   copy: ['M8 8h12v12H8zM16 4H4v12'],
   pencil: ['m4 16-1 5 5-1L20 8l-4-4L4 16Zm9-9 4 4'],
   'trash-2': ['M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7'],
