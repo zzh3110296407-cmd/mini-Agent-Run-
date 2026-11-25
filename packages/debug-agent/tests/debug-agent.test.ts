@@ -261,6 +261,25 @@ describe('[F05_MULTI_TURN_INVESTIGATION] debug prompt and tolerant conclusion ex
     });
   });
 
+  it.each([['LF', '\n'], ['CRLF', '\r\n']])('preserves literal log line numbers in %s fences around the selected conclusion', (_style, newline) => {
+    const log = ['  ~~~text', 'BEGIN  ', '', '', 'END', '  ~~~'].join(newline);
+    const secondary = [backticks + 'log', 'A', '  ', '\t', 'B', backticks].join(newline);
+    const title = 'Trace excerpt. END is on line 4.';
+    const after = 'Second excerpt.';
+    const answer = [
+      '', title, '', '', log, '', '',
+      fence(JSON.stringify(exampleConclusion), 'investigation-conclusion', '~~~', newline),
+      '', '', after, '', '', secondary, '', '',
+    ].join(newline);
+    const output = extractInvestigationConclusion(answer);
+    expect(output).toEqual({
+      conclusion: exampleConclusion,
+      cleanedAnswer: [title, '', log, '', after, '', secondary].join(newline),
+    });
+    const displayed = output.cleanedAnswer.split(newline);
+    expect(displayed.indexOf('END') - displayed.indexOf('BEGIN  ') + 1).toBe(4);
+  });
+
   it('chooses the last valid dedicated block and uses its summary for a block-only answer', () => {
     const earlier = conclusionFence({ ...exampleConclusion, summary: 'Earlier summary' });
     const selected = conclusionFence();
