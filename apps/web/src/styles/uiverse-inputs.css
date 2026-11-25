@@ -65,3 +65,31 @@
   background: var(--status-failed-bg);
   border-color: var(--status-failed-border);
 }
+
+.uiv-composer {
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  transition: border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+}
+.uiv-composer:focus-within {
+  border-color: var(--ring-border);
+  box-shadow: 0 0 0 3px var(--ring-glow);
+}
+.uiv-composer--running { border-color: var(--status-running-border); }
+.uiv-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  max-height: 160px;
+  padding: 9px 11px 4px;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+  resize: none;
+  field-sizing: content;
+}
+.uiv-composer textarea:disabled { color: var(--text-secondary); }

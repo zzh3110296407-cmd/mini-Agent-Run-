@@ -105,11 +105,15 @@ export function useSessions(client: SessionClient = apiClient) {
     if (activeSessionId.value === id) await selectSession(sessions.value[0]?.id ?? null);
   }
 
+  function syncSessionRunState(id: SessionId, patch: { hasActiveRun?: boolean; runCount?: number }) {
+    sessions.value = sessions.value.map((item) => item.id === id ? { ...item, ...patch } : item);
+  }
+
   onMounted(loadSessions);
   onUnmounted(() => { listRequest++; detailRequest++; });
 
   return {
     sessions, filteredSessions, filterQuery, activeSessionId, activeSessionDetail, loading, detailLoading, errorMessage,
-    createSession, renameSession, deleteSession, selectSession, loadSessions,
+    createSession, renameSession, deleteSession, selectSession, loadSessions, refreshSessions, syncSessionRunState,
   };
 }

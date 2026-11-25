@@ -28,6 +28,11 @@ const paths = {
   check: ['m5 12 4 4L19 6'],
   'alert-circle': ['M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z', 'M12 8v4m0 4h.01'],
   'refresh-cw': ['M20 7v4h-4M4 17v-4h4m12-2A8 8 0 0 0 6 6m-2 7a8 8 0 0 0 14 5'],
+  'arrow-down': ['M12 4v16m-6-6 6 6 6-6'],
+  send: ['M21 3 10.5 13.5M21 3l-7 18-3.5-7.5L3 10z'],
+  clock: ['M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z', 'M12 7v5l3 2'],
+  zap: ['m13 2-9 12h7l-1 8 10-12h-8z'],
+  terminal: ['M3 5h18v14H3zM7 9l3 3-3 3m6 0h4'],
 };
 
 export type IconName = keyof typeof paths;
