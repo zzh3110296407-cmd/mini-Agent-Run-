@@ -13,6 +13,7 @@ export function classifyLogLevel(text: string): LogLevel {
 
 export function sliceTextContent(
   content: string, { offsetLine, limit, level, q }: { offsetLine: number; limit: number; level?: LogLevel; q?: string },
+  classify: (text: string) => LogLevel = classifyLogLevel,
 ): TextSliceResponse {
   const keyword = q?.toLowerCase() ?? '';
   const lines: LogLine[] = [];
@@ -26,7 +27,7 @@ export function sliceTextContent(
     const text = content.slice(start, newline !== -1 && content[end - 1] === '\r' ? end - 1 : end);
     start = newline === -1 ? content.length : newline + 1;
     totalLines += 1;
-    const lineLevel = classifyLogLevel(text);
+    const lineLevel = classify(text);
     if ((level !== undefined && lineLevel !== level) || (keyword && !text.toLowerCase().includes(keyword))) continue;
 
     matchedLines += 1;

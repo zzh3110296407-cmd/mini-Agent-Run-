@@ -74,6 +74,7 @@ export interface TraceWorkspacePort {
 export interface ToolExecutionContext {
   runId: string;
   sessionId: string;
+  toolCallId?: string;
   targetPath: string;
   allowedRoots: readonly string[];
   toolMode: ToolMode;

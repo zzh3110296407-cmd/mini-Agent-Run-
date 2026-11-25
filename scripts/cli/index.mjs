@@ -8,7 +8,7 @@ import { printGuardrails, runGraph, runGuardrails } from '../check-guardrails.mj
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
-const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph> [--json|--help]';
+const usage = 'Usage: npm run cli -- <env-check|guardrails|smoke|graph|tools-smoke> [--path <dir>] [--json|--help]';
 
 function envCheck() {
   const exists = (file) => existsSync(join(root, file));
@@ -23,14 +23,17 @@ function envCheck() {
   return { ok: checks.every((check) => check.ok), checks, warnings };
 }
 
-async function smoke() {
+function buildPackages() {
   // Build the workspace exports so this also works immediately after a fresh install.
   execFileSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-b', 'tsconfig.packages.json'], {
     cwd: root,
     stdio: 'pipe',
     windowsHide: true,
   });
+}
 
+async function smoke() {
+  buildPackages();
   const { buildApp } = await tsImport('../../apps/server/src/app.ts', import.meta.url);
   const { HealthResponseSchema } = await import('@mini-agent-run/shared');
   const app = buildApp();
@@ -48,11 +51,18 @@ async function smoke() {
   }
 }
 
+async function toolsSmoke(path) {
+  buildPackages();
+  const { runToolsSmoke } = await import('./tools-smoke.mjs');
+  return runToolsSmoke(root, path);
+}
+
 const commands = new Map([
   ['env-check', envCheck],
   ['guardrails', runGuardrails],
   ['smoke', smoke],
   ['graph', runGraph],
+  ['tools-smoke', toolsSmoke],
 ]);
 
 function printGraph(result) {
@@ -86,30 +96,52 @@ function printResult(command, result, json) {
       console.log((ok ? 'PASS ' : 'FAIL ') + name + (value ? ' ' + value : ''));
     }
     for (const warning of result.warnings) console.warn('WARN ' + warning);
+  } else if (command === 'tools-smoke') {
+    console.log('PASS tools-smoke | ' + result.artifactSource + ' | '
+      + result.rawBytes + ' raw bytes | ' + result.summaryBytes + ' summary bytes | cascade cleared');
   } else {
     console.log('PASS GET /api/health HTTP ' + result.statusCode + ' | SQLite ' + result.health.sqlite);
   }
 }
 
+function parseFlags(command, flags) {
+  let path;
+  let format;
+  for (let index = 0; index < flags.length; index++) {
+    const flag = flags[index];
+    if (command === 'tools-smoke' && flag === '--path' && path === undefined) {
+      path = flags[++index];
+      if (!path?.trim() || path.startsWith('-')) return null;
+    } else if ((flag === '--json' || flag === '--help') && format === undefined) {
+      format = flag;
+    } else {
+      return null;
+    }
+  }
+  return { path, format };
+}
+
 const [command, ...flags] = process.argv.slice(2);
 const run = commands.get(command);
-const flag = flags[0];
+const options = run ? parseFlags(command, flags) : null;
 
-if ((command === '--help' && flags.length === 0) || (run && flag === '--help' && flags.length === 1)) {
+if ((command === '--help' && flags.length === 0) || options?.format === '--help') {
   console.log(usage);
-} else if (!run || flags.length > 1 || (flag !== undefined && flag !== '--json')) {
+} else if (!run || !options) {
   console.error(usage);
   process.exitCode = 1;
 } else {
-  const json = flag === '--json';
+  const json = options.format === '--json';
 
   try {
-    const result = await run();
+    const result = await run(options.path);
     printResult(command, result, json);
     if (!result.ok) process.exitCode = 1;
   } catch (error) {
     if (json) {
-      console.log(JSON.stringify({ ok: false, error: error.message }));
+      const failure = JSON.stringify({ ok: false, error: error.message });
+      if (command === 'tools-smoke') console.error(failure);
+      else console.log(failure);
     } else {
       console.error(error.message);
     }

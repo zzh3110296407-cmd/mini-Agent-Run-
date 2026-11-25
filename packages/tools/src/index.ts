@@ -11,8 +11,11 @@ import { searchLogs } from './tools/search-logs.js';
 import { analyzeTraceDetails, loadTrace, traceRecords } from './trace-analyzer.js';
 
 export { sanitizeTraceContent } from './sanitize.js';
-export { analyzeTraceContent, analyzeTraceDetails, type TraceAnalysisDetails } from './trace-analyzer.js';
-export { truncateUtf8Safe } from './utf8.js';
+export { analyzeTraceContent, analyzeTraceDetails, classifyTraceLine, type TraceAnalysisDetails } from './trace-analyzer.js';
+export { truncateUtf8Safe, truncateUtf8TailSafe } from './utf8.js';
+export {
+  summarizeToolOutput, formatOffloadedToolResultContent, offloadOversizedToolOutput, wrapToolsWithArtifactOffload,
+} from './artifact-offload.js';
 
 export const TOOLS_PACKAGE_NAME = '@mini-agent-run/tools';
 

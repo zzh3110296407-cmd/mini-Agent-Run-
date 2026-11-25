@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { gitIn, inGitFixture, runNode } from './git-fixture.js';
@@ -10,8 +11,8 @@ if (!npm) throw new Error('Run the CLI contract tests through npm.');
 const env = Object.fromEntries(Object.entries(process.env)
   .filter(([name]) => name.toLowerCase() !== 'npm_config_loglevel'));
 
-const invoke = (command: string, flags: string[] = [], cwd?: string) =>
-  runNode([npm, 'run', 'cli', '--', command, ...flags], { cwd, env });
+const invoke = (command: string, flags: string[] = [], cwd?: string, overrides: NodeJS.ProcessEnv = {}) =>
+  runNode([npm, 'run', 'cli', '--', command, ...flags], { cwd, env: { ...env, ...overrides } });
 
 function repoStatus() {
   const status = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
@@ -72,6 +73,83 @@ describe('M0-06 npm CLI contract', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('env-check|guardrails|smoke|graph');
   });
+});
+
+describe('M1.5 tools-smoke CLI contract', () => {
+  function success(result: Awaited<ReturnType<typeof invoke>>, artifactSource: string) {
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toBe('');
+    const data = JSON.parse(result.stdout);
+    expect(data).toMatchObject({
+      ok: true, artifactSource, artifactId: expect.stringMatching(/^art_[0-9a-f-]{36}$/), cascadeCleared: true,
+    });
+    expect(data.summaryBytes).toBeGreaterThan(0);
+    expect(data.summaryBytes).toBeLessThanOrEqual(6144);
+    expect(data.rawBytes).toBeGreaterThan(6144);
+    return data;
+  }
+
+  it.concurrent('naturally offloads on two consecutive runs without changing Git status or the source', async () => {
+    const before = repoStatus();
+    const file = 'data/fixtures/diagnostic-demo/noisy-large-xss.log';
+    const original = readFileSync(file);
+    const defaults = { ALLOWED_TRACE_ROOTS: undefined };
+    const first = success(await invoke('tools-smoke', ['--json'], undefined, defaults), 'search_logs');
+    const second = success(await invoke('tools-smoke', ['--json'], undefined, defaults), 'search_logs');
+    expect(first).toMatchObject({ sourceFile: 'noisy-large-xss.log', sourceLine: expect.any(Number) });
+    expect(first.sourceLine).toBeGreaterThan(0);
+    expect(first.artifactId).not.toBe(second.artifactId);
+    expect({ ...first, artifactId: null }).toEqual({ ...second, artifactId: null });
+    expect(repoStatus()).toBe(before);
+    expect(readFileSync(file)).toEqual(original);
+  }, 12000);
+
+  it.concurrent('uses a labelled fallback for an allowed small directory and rejects an empty allowed directory', async () => {
+    const parent = realpathSync.native(tmpdir());
+    const dir = mkdtempSync(join(parent, 'm15-cli-small-'));
+    if (dirname(dir) !== parent) throw new Error('Unexpected temporary fixture directory.');
+    const small = join(dir, 'small fixture');
+    const empty = join(dir, 'empty');
+    const original = 'INFO small smoke input\nWARN harmless example\n';
+    const file = join(small, 'test.log');
+    const env = { ALLOWED_TRACE_ROOTS: dir };
+    try {
+      mkdirSync(small);
+      mkdirSync(empty);
+      writeFileSync(file, original);
+      const before = repoStatus();
+      const result = success(await invoke('tools-smoke', ['--path', small, '--json'], undefined, env), 'synthetic_fallback');
+      expect(result).toMatchObject({ sourceFile: 'test.log', sourceLine: null });
+      const failed = await invoke('tools-smoke', ['--json', '--path', empty], undefined, env);
+      expect(failed.status).toBe(1);
+      expect(failed.stdout).toBe('');
+      expect(failed.stderr).toContain('no supported trace files');
+      expect(readFileSync(file, 'utf8')).toBe(original);
+      expect(repoStatus()).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 12000);
+
+  it.concurrent('prints tools-smoke help and rejects out-of-scope paths and invalid flags on stderr', async () => {
+    const help = await invoke('tools-smoke', ['--help']);
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('env-check|guardrails|smoke|graph|tools-smoke');
+    const failures = await Promise.all([
+      invoke('tools-smoke', ['--path', '../..', '--json'], undefined, { ALLOWED_TRACE_ROOTS: './data/fixtures' }),
+      invoke('tools-smoke', ['--path']),
+      invoke('tools-smoke', ['--path', 'a', '--path', 'b']),
+      invoke('tools-smoke', ['--unknown']),
+      invoke('smoke', ['--path', 'a']),
+    ]);
+    for (const failure of failures) {
+      expect(failure.status).toBe(1);
+      expect(failure.stdout).toBe('');
+    }
+    expect(failures[0]?.stderr).toContain('PATH_OUTSIDE_ALLOWED_ROOTS');
+    for (const invalid of failures.slice(1)) expect(invalid.stderr).toContain('Usage:');
+  }, 12000);
 });
 
 describe('G06-08 graph CLI in a Git repository', () => {

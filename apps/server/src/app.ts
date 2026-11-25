@@ -1,6 +1,8 @@
 import { APP_NAME, HealthResponseSchema } from '@mini-agent-run/shared';
 import Fastify from 'fastify';
+import { registerArtifactRoutes } from './artifact-routes.js';
 import { DEFAULT_ALLOWED_TRACE_ROOTS, splitAllowedTraceRoots } from './config/env.js';
+import { createSqliteArtifactStore } from './db/artifact-store.js';
 import { openAppDatabase, recoverStaleRuns, type DatabaseOwnerLock } from './db/database.js';
 import { PathSandboxError, WORKSPACE_ROOT, browseSafeDirectory, resolveAllowedRoots } from './fs/path-sandbox.js';
 import { registerSessionRoutes } from './session-routes.js';
@@ -45,12 +47,14 @@ export function buildApp(options: BuildAppOptions = {}, ownerLock?: DatabaseOwne
 
   const db = openAppDatabase(ownerLock?.dbPath ?? options.dbPath ?? ':memory:');
   try {
+    const artifactStore = createSqliteArtifactStore(db);
     registerSessionRoutes(app, db, resolveRoots, { baseDir, maxFileSliceBytes: options.maxFileSliceBytes });
+    registerArtifactRoutes(app, db);
     app.addHook('onClose', async () => {
       db.close();
       ownerLock?.release();
     });
-    return Object.assign(app, { recoverStaleRuns: () => recoverStaleRuns(db) });
+    return Object.assign(app, { artifactStore, recoverStaleRuns: () => recoverStaleRuns(db) });
   } catch (error) {
     db.close();
     throw error;
