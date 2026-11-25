@@ -1,29 +1,18 @@
 <script setup lang="ts">
-import { HealthResponseSchema } from '@mini-agent-run/shared';
-import { onMounted, ref } from 'vue';
+import { ref } from 'vue';
 import AppTopbar from './components/layout/AppTopbar.vue';
 import ResizableDivider from './components/layout/ResizableDivider.vue';
+import SettingsModal from './components/sidebar/SettingsModal.vue';
+import UiButton from './components/ui/UiButton.vue';
 import UiEmpty from './components/ui/UiEmpty.vue';
 import UiIcon from './components/ui/UiIcon.vue';
 import UiSheet from './components/ui/UiSheet.vue';
+import { useHealthProbe } from './composables/useHealthProbe';
 import { useWorkbenchLayout } from './composables/useWorkbenchLayout';
 
-const health = ref<'online' | 'offline' | 'loading'>('loading');
+const settingsOpen = ref(false);
+const { health, checkHealth } = useHealthProbe();
 const { viewport, theme, inspectorOpen, sidebarDrawerOpen, inspectorWidth, toggleTheme, setInspectorWidth } = useWorkbenchLayout();
-
-async function checkHealth() {
-  health.value = 'loading';
-  try {
-    const response = await fetch('/api/health');
-    if (!response.ok) throw new Error(`Health request failed with HTTP ${response.status}`);
-    HealthResponseSchema.parse(await response.json());
-    health.value = 'online';
-  } catch {
-    health.value = 'offline';
-  }
-}
-
-onMounted(checkHealth);
 </script>
 
 <template>
@@ -36,6 +25,7 @@ onMounted(checkHealth);
     <div class="workbench-body">
       <aside v-if="viewport !== 'mobile'" id="sidebar-pane" class="workbench-sidebar" aria-label="排查会话">
         <h2>排查会话</h2>
+        <UiButton variant="ghost" data-testid="open-settings-btn" @click="settingsOpen = true"><UiIcon name="settings" />设置</UiButton>
       </aside>
       <main class="workspace">
         <div class="workspace-inner">
@@ -53,11 +43,14 @@ onMounted(checkHealth);
     <UiSheet
       v-if="viewport === 'mobile'" id="sidebar-pane" :open="sidebarDrawerOpen" side="left" title="排查会话"
       @close="sidebarDrawerOpen = false"
-    />
+    >
+      <UiButton variant="ghost" data-testid="open-settings-btn" @click="settingsOpen = true"><UiIcon name="settings" />设置</UiButton>
+    </UiSheet>
     <UiSheet
       v-if="viewport !== 'desktop'" id="inspector-panel" :open="inspectorOpen" side="right" title="日志检视器"
       @close="inspectorOpen = false"
     />
+    <SettingsModal :open="settingsOpen" @close="settingsOpen = false" />
   </div>
 </template>
 
