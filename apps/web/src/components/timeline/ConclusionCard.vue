@@ -24,7 +24,7 @@ function location(evidence: EvidenceRef) {
       <UiBadge
         data-assessment="hasToolError"
         :tone="conclusion.threeStateAssessment?.hasToolError === false ? 'completed' : conclusion.threeStateAssessment?.hasToolError ? 'failed' : 'neutral'"
-      >工具报错 {{ conclusion.threeStateAssessment?.hasToolError === undefined ? '未知' : conclusion.threeStateAssessment.hasToolError ? '有' : '无' }}</UiBadge>
+      >{{ conclusion.threeStateAssessment?.hasToolError === undefined ? '工具报错未知' : conclusion.threeStateAssessment.hasToolError ? '有工具报错' : '无工具报错' }}</UiBadge>
       <UiBadge
         data-assessment="taskOutcome"
         :tone="conclusion.threeStateAssessment?.taskOutcome === 'passed' ? 'completed' : conclusion.threeStateAssessment?.taskOutcome === 'failed' ? 'failed' : 'neutral'"

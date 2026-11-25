@@ -1,19 +1,22 @@
 <script setup lang="ts">
 import type { CreateSessionRequest, SessionId, SessionListItem } from '@mini-agent-run/shared';
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
 import AppTopbar from './components/layout/AppTopbar.vue';
+import InspectorTargetPreview from './components/layout/InspectorTargetPreview.vue';
 import ResizableDivider from './components/layout/ResizableDivider.vue';
 import SessionTargetSummary from './components/layout/SessionTargetSummary.vue';
 import DeleteSessionAlert from './components/sidebar/DeleteSessionAlert.vue';
 import PathPickerModal from './components/sidebar/PathPickerModal.vue';
 import SessionSidebar from './components/sidebar/SessionSidebar.vue';
 import SettingsModal from './components/sidebar/SettingsModal.vue';
+import InvestigationWorkspace from './components/timeline/InvestigationWorkspace.vue';
 import UiEmpty from './components/ui/UiEmpty.vue';
 import UiIcon from './components/ui/UiIcon.vue';
 import UiSheet from './components/ui/UiSheet.vue';
 import { useApiKeySettings } from './composables/useApiKeySettings';
 import { useHealthProbe } from './composables/useHealthProbe';
 import { formatPathError, type PathError } from './composables/usePathBrowser';
+import { useRunStream, type InspectorTargetRequest } from './composables/useRunStream';
 import { formatSessionError, useSessions } from './composables/useSessions';
 import { useWorkbenchLayout } from './composables/useWorkbenchLayout';
 import { isTextEntry } from './utils/isTextEntry';
@@ -25,13 +28,27 @@ const creationError = shallowRef<PathError | null>(null);
 const deletionTarget = shallowRef<SessionListItem | null>(null);
 const deleting = ref(false);
 const deletionError = ref('');
+const pendingInspectorTarget = shallowRef<InspectorTargetRequest | null>(null);
 const { hasCustomApiKey } = useApiKeySettings();
 const { health, checkHealth } = useHealthProbe();
 const { viewport, theme, inspectorOpen, sidebarDrawerOpen, inspectorWidth, toggleTheme, setInspectorWidth } = useWorkbenchLayout();
 const {
   sessions, filteredSessions, filterQuery, activeSessionId, activeSessionDetail, loading, detailLoading, errorMessage,
-  createSession, renameSession, deleteSession, selectSession, loadSessions,
+  createSession, renameSession, deleteSession, selectSession, loadSessions, refreshSessions, syncSessionRunState,
 } = useSessions();
+
+const stream = useRunStream({
+  sessionId: activeSessionId,
+  sessionDetail: activeSessionDetail,
+  async refreshSession(id) {
+    if (id === activeSessionId.value) await Promise.all([selectSession(id), refreshSessions()]);
+  },
+  syncSessionRunState(id, patch) {
+    syncSessionRunState(id, patch);
+    void refreshSessions();
+  },
+});
+watch(activeSessionId, () => { pendingInspectorTarget.value = null; });
 
 const summary = computed(() => {
   const listed = sessions.value.find(({ id }) => id === activeSessionId.value);
@@ -40,7 +57,7 @@ const summary = computed(() => {
   if (!session) return null;
   return {
     session, runCount: listed?.runCount ?? detail?.runs.length ?? 0,
-    hasActiveRun: detail?.hasActiveRun ?? listed?.hasActiveRun ?? false,
+    hasActiveRun: listed?.hasActiveRun ?? detail?.hasActiveRun ?? false,
   };
 });
 
@@ -115,6 +132,12 @@ function toggleInspector() {
   if (inspectorOpen.value && viewport.value !== 'desktop') sidebarDrawerOpen.value = false;
 }
 
+function openInspector(target: InspectorTargetRequest) {
+  pendingInspectorTarget.value = target;
+  inspectorOpen.value = true;
+  if (viewport.value !== 'desktop') sidebarDrawerOpen.value = false;
+}
+
 async function handleKeyboard(event: KeyboardEvent) {
   if (event.defaultPrevented || event.isComposing) return;
   if (event.key === 'Escape') {
@@ -155,10 +178,14 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
         <SessionSidebar v-bind="sidebarProps" v-on="sidebarEvents" />
       </aside>
       <main class="workspace">
-        <div class="workspace-inner">
-          <h1>{{ summary?.session.title ?? '排查工作区' }}</h1>
-          <SessionTargetSummary v-if="summary" v-bind="summary" />
-          <UiEmpty v-else :title="loading || detailLoading ? '正在读取会话…' : '尚未选择会话'">
+        <InvestigationWorkspace
+          v-if="summary" :key="summary.session.id" :session="summary.session" :stream="stream"
+          :ready="activeSessionDetail?.session.id === summary.session.id" :detail-loading="detailLoading"
+          @open-inspector="openInspector" @open-settings="settingsOpen = true"
+        />
+        <div v-else class="workspace-inner">
+          <h1>排查工作区</h1>
+          <UiEmpty :title="loading || detailLoading ? '正在读取会话…' : '尚未选择会话'">
             <template #icon><UiIcon name="folder-open" :size="23" /></template>
             <template v-if="!loading && !detailLoading">点击「新建排查会话」，选择要排查的轨迹文件或目录。</template>
           </UiEmpty>
@@ -169,7 +196,8 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
         <aside id="inspector-panel" class="inspector" :style="{ width: inspectorWidth + 'px' }" aria-label="日志检视器">
           <h2>日志检视器</h2>
           <div class="inspector-content">
-            <SessionTargetSummary v-if="summary" v-bind="summary" />
+            <InspectorTargetPreview v-if="summary && pendingInspectorTarget" :target="pendingInspectorTarget" :target-path="summary.session.targetPath" />
+            <SessionTargetSummary v-else-if="summary" v-bind="summary" />
             <UiEmpty v-else title="选择会话后可查看绑定目标" />
           </div>
         </aside>
@@ -186,7 +214,8 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
       @close="inspectorOpen = false"
     >
       <div class="inspector-content">
-        <SessionTargetSummary v-if="summary" v-bind="summary" />
+        <InspectorTargetPreview v-if="summary && pendingInspectorTarget" :target="pendingInspectorTarget" :target-path="summary.session.targetPath" />
+        <SessionTargetSummary v-else-if="summary" v-bind="summary" />
         <UiEmpty v-else title="选择会话后可查看绑定目标" />
       </div>
     </UiSheet>
@@ -204,8 +233,8 @@ onUnmounted(() => window.removeEventListener('keydown', handleKeyboard));
 .workbench-body { display: flex; flex: 1; min-height: 0; }
 .workbench-sidebar, .inspector { flex: none; min-height: 0; background: var(--bg-panel); }
 .workbench-sidebar { width: var(--sidebar-width); border-inline-end: 1px solid var(--border-subtle); }
-.workspace { min-width: 0; flex: 1; overflow: auto; }
-.workspace-inner { width: min(100%, 760px); margin: auto; padding: 27px clamp(16px, 4vw, 32px); }
+.workspace { display: flex; flex: 1; flex-direction: column; min-width: 0; overflow: hidden; }
+.workspace-inner { width: min(100%, 760px); margin-inline: auto; padding: 27px clamp(16px, 4vw, 32px); overflow: auto; }
 .workspace h1 { margin: 0 0 15px; font-size: 23px; line-height: 1.28; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .inspector > h2 { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
 .inspector { max-width: calc(100% - var(--sidebar-width) - 285px); overflow: auto; }
