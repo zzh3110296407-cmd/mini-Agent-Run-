@@ -375,6 +375,7 @@ describe('[F05_MULTI_TURN_INVESTIGATION] debug prompt and tolerant conclusion ex
       fence('{"foo": 1}', 'json'),
       fence('{not JSON'),
       fence(JSON.stringify(invalidEvidence)),
+      fence(JSON.stringify({ ...exampleConclusion, threeStateAssessment: { terminationReason: 42 } })),
       backticks + 'investigation-conclusion\n{"summary":"missing',
       fence(conclusionFence(), 'text', '~~~~'),
       fence(JSON.stringify(exampleConclusion), 'investigation-conclusion') + '~',
@@ -600,6 +601,32 @@ describe('[F05_MULTI_TURN_INVESTIGATION] offline debug investigations', () => {
       expect(JSON.parse(readback?.content ?? '')).toMatchObject({ lines: [{ lineNumber: 1, text: firstLine }] });
     },
   );
+
+  it('F05_MULTI_TURN_INVESTIGATION retains the conclusion of a long investigation with unknown trace termination', async () => {
+    const { input, tools } = debugFixture();
+    const finalAnswer = 'The observed charge differs from the quoted charge. '.repeat(170).trim();
+    const conclusion: InvestigationConclusion = {
+      ...exampleConclusion,
+      threeStateAssessment: { hasToolError: false, taskOutcome: 'failed' },
+    };
+    const raw = finalAnswer + '\n\n' + fence(JSON.stringify({
+      ...conclusion, threeStateAssessment: { ...conclusion.threeStateAssessment, terminationReason: null },
+    }));
+    const provider = createMockLLMProvider({ turns: (_request, index) => index < 61
+      ? { toolCalls: [call('list_' + index, 'list_files')] }
+      : { text: raw, chunkSize: 173 },
+    });
+    const events: AgentEvent[] = [];
+    const result = await runDebugInvestigation({
+      ...input, tools, provider, model: 'fixture', onEvent: (event) => { events.push(event); },
+    });
+    expect(result.state).toMatchObject({ status: 'completed', step: 62 });
+    expect(result.state.messages.at(-1)?.content).toBe(raw);
+    expect(result.conclusion).toEqual(conclusion);
+    expect(result.finalAnswer).toBe(finalAnswer);
+    expect(events.at(-1)).toMatchObject({ type: 'agent_end', status: 'completed', finalAnswer, conclusion });
+    expect(InvestigationConclusionSchema.safeParse(result.conclusion).success).toBe(true);
+  });
 
   it('runs real tools, offloads a large search result, reads the Artifact and answers with a structured conclusion', async () => {
     const { tools, save, readSlice, input } = debugFixture();

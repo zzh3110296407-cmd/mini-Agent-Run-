@@ -1,10 +1,11 @@
 import {
   SessionDetailSchema, SessionListItemSchema, SessionSchema,
-  type InvestigationRun, type Session,
+  type Session,
 } from '@mini-agent-run/shared';
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
+import { decodeStoredRun, type StoredRun } from './run-record.js';
 
 const sessionFields = `
   id, title, title_source AS titleSource, target_path AS targetPath, path_type AS pathType,
@@ -17,8 +18,6 @@ export const nextActivityTime = `
     SELECT strftime('%Y-%m-%dT%H:%M:%fZ', max(updated_at), '+0.001 seconds') FROM sessions
   ), @now))
 `;
-
-type RunRow = Omit<InvestigationRun, 'conclusion'> & { conclusion: string | null };
 
 export function deriveAutoSessionTitle(realPath: string) {
   return basename(realPath).trim() || realPath;
@@ -62,7 +61,7 @@ export function getSessionDetail(db: Database.Database, sessionId: string) {
   return db.transaction(() => {
     const session = getSession(db, sessionId);
     if (!session) return null;
-    const runs = db.prepare<[string], RunRow>(`
+    const runs = db.prepare<[string], StoredRun>(`
       SELECT id, session_id AS sessionId, retry_of_run_id AS retryOfRunId, prompt,
              status, stop_reason AS stopReason, error_code AS errorCode, error_message AS errorMessage,
              model_provider AS modelProvider, model_id AS modelId, tool_mode AS toolMode,
@@ -71,9 +70,7 @@ export function getSessionDetail(db: Database.Database, sessionId: string) {
              started_at AS startedAt, ended_at AS endedAt, duration_ms AS durationMs
       FROM investigation_runs WHERE session_id = ?
       ORDER BY created_at ASC, rowid ASC
-    `).all(sessionId).map((run) => ({
-      ...run, conclusion: run.conclusion === null ? null : JSON.parse(run.conclusion),
-    }));
+    `).all(sessionId).map(decodeStoredRun);
     const hasActiveRun = runs.some((run) => run.status === 'pending' || run.status === 'running');
     return SessionDetailSchema.parse({ session, hasActiveRun, runs });
   })();

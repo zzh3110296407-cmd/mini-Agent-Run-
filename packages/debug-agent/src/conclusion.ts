@@ -33,10 +33,20 @@ function findBlocks(answer: string) {
   return blocks;
 }
 
+function omitNullTerminationReason(payload: unknown): unknown {
+  if (typeof payload !== 'object' || payload === null || !('threeStateAssessment' in payload)) return payload;
+  const assessment = payload.threeStateAssessment;
+  if (typeof assessment !== 'object' || assessment === null
+      || !('terminationReason' in assessment) || assessment.terminationReason !== null) return payload;
+  const observedSignals: Record<string, unknown> = { ...assessment };
+  delete observedSignals.terminationReason;
+  return { ...payload, threeStateAssessment: observedSignals };
+}
+
 function parseBlock(answer: string, block: Block): InvestigationConclusion | undefined {
   try {
     const payload: unknown = JSON.parse(answer.slice(block.bodyStart, block.bodyEnd));
-    const result = InvestigationConclusionSchema.safeParse(payload);
+    const result = InvestigationConclusionSchema.safeParse(omitNullTerminationReason(payload));
     return result.success ? result.data : undefined;
   } catch {
     return undefined;
