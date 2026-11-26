@@ -116,13 +116,26 @@ function controls(page) {
     await id('new-session-btn').click();
     const modal = id('path-picker-modal');
     await expect(modal).toBeVisible();
-    await expect(modal.getByTestId('allowed-root-chip')).toHaveCount(2);
-    await modal.getByTestId('allowed-root-chip').last().click();
+    await expect(modal.getByTestId('allowed-root-chip')).toHaveCount(0);
+    await expect(modal.getByRole('button', { name: /^(?:前往|浏览此路径)$/u })).toHaveCount(0);
+    const address = modal.getByTestId('path-address-input');
+    await address.fill('data/fixtures');
     await modal.getByTestId('fs-entry-row').filter({ hasText: 'diagnostic-demo' }).click();
     const entry = modal.getByTestId('fs-entry-row').filter({ hasText: 'agent-run-passed.jsonl' });
     await expect(entry).toBeVisible();
-    if (!directory) await entry.click();
-    await id('session-title-input').fill(title);
+    if (!directory) {
+      const filePath = await entry.getAttribute('data-entry-path');
+      assert.ok(filePath);
+      await address.fill(filePath);
+      await address.press('Enter');
+      await expect(entry).toHaveAttribute('aria-pressed', 'true');
+    }
+    await expect(modal.getByTestId('path-selection-summary')).toContainText(directory ? '目录' : '单文件');
+    await modal.getByTestId('session-title-trigger').click();
+    const titleInput = modal.getByTestId('session-title-input');
+    await titleInput.fill(title);
+    await titleInput.press('Enter');
+    await expect(modal.getByTestId('session-title-trigger')).toHaveText(title);
     await id('confirm-create-session-btn').click();
     await expect(modal).toHaveCount(0);
     await expect(page.locator('main h1')).toHaveText(title);
