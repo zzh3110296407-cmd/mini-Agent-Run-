@@ -548,6 +548,61 @@ describe('[F02_SESSION_WORKSPACE] persistent sessions and scoped file slices', (
     expect(fs.closeSync).toHaveBeenCalledExactlyOnceWith(fd);
   });
 
+  it('indexes every structured trace error at its physical line and excludes descriptive text', async () => {
+    const app = openTestApp();
+    const raw = [
+      '{',
+      '  "messages": [',
+      '    {"role":"tool","content":"Error: first failure"},',
+      '    {"event":{"type":"tool_execution_end","isError":',
+      '      true}},',
+      '    ' + JSON.stringify({ role: 'tool', content: '{"status":"failed"}' }) + ',',
+      '    {"role":"tool","isError":false,"content":"Error: resolved"},',
+      '    {"role":"assistant","content":"Critical example"},',
+      '    {"level":"warning","message":"Example"},',
+      '    {"toolCalls":[',
+      '      {"toolName":"one","isError":true},',
+      '      {"toolName":"two","is_error":true}',
+      '    ]}',
+      '  ],',
+      '  "metadata":{"reward":0,"extra":{"agent_framework_description":"Critical setup"}}',
+      '}',
+    ];
+    const path = join(directoryA, 'structured.json');
+    fs.writeFileSync(path, raw.join('\r\n'));
+    const session = await create(app, path);
+    const read = async (query: Record<string, string | number> = {}) => {
+      const response = await app.inject(fileSlice(session.id, query));
+      expect(response.statusCode).toBe(200);
+      return TextSliceResponseSchema.parse(response.json());
+    };
+    const full = await read();
+    const errorLines = [3, 5, 6, 11, 12];
+    expect(full.lines.filter(({ level }) => level === 'error').map(({ lineNumber }) => lineNumber)).toEqual(errorLines);
+    expect(full.lines.filter(({ level }) => level === 'warn').map(({ lineNumber }) => lineNumber)).toEqual([9]);
+    expect(full.lines.map(({ text }) => text)).toEqual(raw);
+    const first = await read({ level: 'error', limit: 2 });
+    expect(first).toMatchObject({ matchedLines: 5, hasMore: true, nextOffsetLine: 6 });
+    const second = await read({ level: 'error', startLine: 6 });
+    expect(second).toMatchObject({ matchedLines: 5, hasMore: false, nextOffsetLine: null });
+    expect([...first.lines, ...second.lines].map(({ lineNumber }) => lineNumber)).toEqual(errorLines);
+  });
+
+  it('recognizes structured errors in mixed logs while respecting explicit successes', () => {
+    const lines = [
+      '{"message":"Critical documentation", "isError":false}',
+      'INFO ready',
+      '{"status":"failed","message":"lookup unavailable"}',
+      'ERROR plain text failure',
+      '{"role":"tool","content":{"success":false,"error":"denied"}}',
+      '{"level":"error","message":"explicit error record"}',
+      '{"role":"assistant","content":"Use ERROR to label a failure"}',
+    ];
+    const response = sliceTextContent(lines.join('\n'), { offsetLine: 1, limit: 200, level: 'error' });
+    expect(response.matchedLines).toBe(4);
+    expect(response.lines.map(({ lineNumber }) => lineNumber)).toEqual([3, 4, 5, 6]);
+  });
+
   it('walks filtered pages monotonically and returns each matching line once', () => {
     const choices = [
       { text: 'INFO status', level: 'info' }, { text: '{"level":"debug"}', level: 'info' },

@@ -11,7 +11,9 @@ import { searchLogs } from './tools/search-logs.js';
 import { analyzeTraceDetails, loadTrace, traceRecords } from './trace-analyzer.js';
 
 export { sanitizeTraceContent } from './sanitize.js';
-export { analyzeTraceContent, analyzeTraceDetails, classifyTraceLine, type TraceAnalysisDetails } from './trace-analyzer.js';
+export {
+  analyzeTraceContent, analyzeTraceDetails, classifyTraceLine, createTraceLineClassifier, type TraceAnalysisDetails,
+} from './trace-analyzer.js';
 export { truncateUtf8Safe, truncateUtf8TailSafe } from './utf8.js';
 export {
   summarizeToolOutput, formatOffloadedToolResultContent, offloadOversizedToolOutput, wrapToolsWithArtifactOffload,

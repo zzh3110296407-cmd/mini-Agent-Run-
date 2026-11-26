@@ -1,19 +1,11 @@
 import {
   TextSliceResponseSchema, type LogLevel, type LogLine, type TextSliceResponse,
 } from '@mini-agent-run/shared';
-
-export function classifyLogLevel(text: string): LogLevel {
-  if (/\b(?:ERROR|FATAL|CRITICAL|EXCEPTION|TRACEBACK)\b/i.test(text) || /"isError"\s*:\s*true\b/.test(text)) {
-    return 'error';
-  }
-  if (/\b(?:WARN|WARNING)\b/i.test(text)) return 'warn';
-  if (/\b(?:INFO|DEBUG|TRACE)\b/i.test(text)) return 'info';
-  return 'other';
-}
+import { createTraceLineClassifier } from '@mini-agent-run/tools';
 
 export function sliceTextContent(
   content: string, { offsetLine, limit, level, q }: { offsetLine: number; limit: number; level?: LogLevel; q?: string },
-  classify: (text: string) => LogLevel = classifyLogLevel,
+  classify: (text: string, lineNumber: number) => LogLevel = createTraceLineClassifier(content),
 ): TextSliceResponse {
   const keyword = q?.toLowerCase() ?? '';
   const lines: LogLine[] = [];
@@ -27,7 +19,7 @@ export function sliceTextContent(
     const text = content.slice(start, newline !== -1 && content[end - 1] === '\r' ? end - 1 : end);
     start = newline === -1 ? content.length : newline + 1;
     totalLines += 1;
-    const lineLevel = classify(text);
+    const lineLevel = classify(text, totalLines);
     if ((level !== undefined && lineLevel !== level) || (keyword && !text.toLowerCase().includes(keyword))) continue;
 
     matchedLines += 1;

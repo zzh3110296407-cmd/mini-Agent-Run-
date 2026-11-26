@@ -124,6 +124,14 @@ function recordedError(row: TraceObject) {
   if (error !== undefined && error !== null && error !== false && error !== '') return { field: 'error', failed: true };
 }
 
+function structuredFailureField(row: TraceObject) {
+  const marker = recordedError(row);
+  if (marker) return marker.failed ? marker.field : undefined;
+  if (/^(?:error|fatal|failed|failure)$/i.test(text(row.status)?.trim() ?? '')) return 'status';
+  if (row.success === false) return 'success';
+  if (row.ok === false) return 'ok';
+}
+
 function errorEvidenceField(row: TraceObject, body: string, bodyField: string | undefined) {
   const structured = recordedError(row);
   if (structured) return structured.failed ? structured.field : undefined;
@@ -132,9 +140,7 @@ function errorEvidenceField(row: TraceObject, body: string, bodyField: string | 
   if (first === '{' || first === '[') {
     try {
       const payload = asObject(JSON.parse(body));
-      if (!payload) return;
-      const failed = recordedError(payload)?.failed ?? /^(?:error|fatal|failed|failure)$/i.test(text(payload.status)?.trim() ?? '');
-      return failed ? bodyField : undefined;
+      return payload && structuredFailureField(payload) !== undefined ? bodyField : undefined;
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
     }
@@ -161,6 +167,79 @@ function firstEvidence(
     }
   }
   return { step: record.step, line: record.line, snippet: (body || 'Tool error').trim().slice(0, 240) };
+}
+
+const levelPriority: Record<LogLevel, number> = { other: 0, info: 1, warn: 2, error: 3 };
+
+function declaredLevel(value: unknown): LogLevel {
+  const level = text(value)?.trim() ?? '';
+  if (/^(?:error|fatal|critical|exception|traceback)$/i.test(level)) return 'error';
+  if (/^(?:warn|warning)$/i.test(level)) return 'warn';
+  if (/^(?:info|debug|trace)$/i.test(level)) return 'info';
+  return 'other';
+}
+
+function* logLevelEvidence(row: TraceObject): IterableIterator<{ level: LogLevel; path: JsonPath }> {
+  const bodyField = ['content', 'text', 'message'].find((key) => text(row[key]) || asObject(row[key]));
+  const body = bodyField === undefined ? undefined : row[bodyField];
+  const payload = isToolMessage(row) ? asObject(body) : undefined;
+  const payloadFailure = payload && structuredFailureField(payload);
+  const failure = errorEvidenceField(row, text(body) ?? '', bodyField) ?? structuredFailureField(row);
+  if (failure !== undefined) {
+    yield { level: 'error', path: [failure] };
+  } else if (bodyField !== undefined && payloadFailure !== undefined && !recordedError(row)) {
+    yield { level: 'error', path: [bodyField, payloadFailure] };
+  } else {
+    const levelField = text(row.level) ? 'level' : 'severity';
+    const level = declaredLevel(row[levelField]);
+    if (level !== 'other' && (level !== 'error' || !recordedError(row))) yield { level, path: [levelField] };
+  }
+
+  const callsField = Array.isArray(row.toolCalls) ? 'toolCalls' : 'tool_calls';
+  const calls = row[callsField];
+  if (Array.isArray(calls)) {
+    for (const [index, call] of calls.entries()) {
+      const data = asObject(call);
+      const marker = data && structuredFailureField(data);
+      if (marker !== undefined) yield { level: 'error', path: [callsField, index, marker] };
+    }
+  }
+}
+
+function classifyStandaloneLogLine(line: string): LogLevel {
+  if (/^\s*(?:\{|\[)/u.test(line)) {
+    try {
+      const parsed: unknown = JSON.parse(line);
+      let level: LogLevel = 'other';
+      for (const value of Array.isArray(parsed) ? parsed : [parsed]) {
+        const row = rowData(value);
+        if (!row) continue;
+        for (const evidence of logLevelEvidence(row)) {
+          if (levelPriority[evidence.level] > levelPriority[level]) level = evidence.level;
+        }
+      }
+      return level;
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  return classifyTraceLine(line);
+}
+
+export function createTraceLineClassifier(content: string): (text: string, lineNumber: number) => LogLevel {
+  if (!/^\s*(?:\{|\[)/u.test(content)) return classifyStandaloneLogLine;
+  const trace = sanitizeTraceContent(content, 'trace.json');
+  if (!trace.ok) return classifyStandaloneLogLine;
+
+  const levels = new Map<number, LogLevel>();
+  for (const { row, span, record } of indexedRecords(trace)) {
+    if (!row) continue;
+    for (const { level, path } of logLevelEvidence(row)) {
+      const { line = record.line } = firstEvidence(trace.sanitized, span, record, '', [path]);
+      if (levelPriority[level] > levelPriority[levels.get(line) ?? 'other']) levels.set(line, level);
+    }
+  }
+  return (_text, lineNumber) => levels.get(lineNumber) ?? 'other';
 }
 
 function retryLoops(calls: readonly Call[]): TraceOverview['anomalies']['retryLoops'] {

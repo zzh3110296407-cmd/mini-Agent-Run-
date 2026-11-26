@@ -198,7 +198,7 @@ describe('[F04_LARGE_ARTIFACT_STORE] SQLite persistence, HTTP and tool slice coo
 
         const source = await app.inject('/api/sessions/' + session.id + '/file-slice?file=' + file + '&level=error');
         expect(source.statusCode).toBe(200);
-        expect(TextSliceResponseSchema.parse(source.json()).lines).toEqual([{ lineNumber: 4, level: 'error', text: 'ERROR root cause' }]);
+        expect(TextSliceResponseSchema.parse(source.json())).toEqual(errors.slice);
 
         for (const path of ['invalid', saved.id + '?offsetLine=0', saved.id + '?offsetLine=1e2', saved.id + '?limit=201',
           saved.id + '?level=debug', saved.id + '?q=a&q=b', saved.id + '?limit=1&limit=2']) {
