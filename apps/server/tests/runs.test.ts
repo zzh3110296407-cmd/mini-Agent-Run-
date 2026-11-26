@@ -74,6 +74,40 @@ function providerResponse(...chunks: object[]) {
 }
 
 describe('M2.3 Run HTTP and SSE', () => {
+  it('F05_MULTI_TURN_INVESTIGATION and F07_RUN_RETRY continue beyond the old twelve-step default', async () => {
+    const provider = createMockLLMProvider({ turns: ({ messages }, index) => {
+      if (index >= 40) return { error: failure };
+      const currentTurn = messages.findLastIndex(({ role }) => role === 'user');
+      const toolResults = messages.slice(currentTurn + 1).filter(({ role }) => role === 'tool');
+      return toolResults.length < 13
+        ? { toolCalls: [toolCall('list_files', { maxFiles: 1 })] }
+        : { text: 'Investigation completed.' };
+    } });
+    await withApp({ llmProvider: provider }, async (app) => {
+      const session = await createFixtureSession(app);
+      const uncapped = await start(app, session.id);
+      expect(uncapped.maxSteps).toBeNull();
+      const first = await settle(app, uncapped.id);
+      expect(first.run).toMatchObject({ maxSteps: null, status: 'completed', stepCount: 14 });
+      expect(first.events[0]?.event).toMatchObject({ type: 'agent_start', maxSteps: null });
+
+      const startLegacy = await app.inject({
+        method: 'POST', url: '/api/sessions/' + session.id + '/runs', payload: { prompt: 'Legacy limit', maxSteps: 12 },
+      });
+      expect(startLegacy.statusCode).toBe(201);
+      const legacy = await settle(app, InvestigationRunSchema.parse(startLegacy.json()).id);
+      expect(legacy.run).toMatchObject({ maxSteps: 12, status: 'stopped', stopReason: 'max_steps', stepCount: 12 });
+      const retry = await app.inject({ method: 'POST', url: '/api/runs/' + legacy.run.id + '/retry', payload: {} });
+      expect(retry.statusCode).toBe(201);
+      const repeated = await settle(app, InvestigationRunSchema.parse(retry.json()).id);
+      expect(repeated.run).toMatchObject({ retryOfRunId: legacy.run.id, maxSteps: null, status: 'completed', stepCount: 14 });
+
+      const history = await app.inject('/api/sessions/' + session.id);
+      expect(history.statusCode).toBe(200);
+      expect(history.json().runs.map((run: { maxSteps: number | null }) => run.maxSteps)).toEqual([null, 12, null]);
+    });
+  });
+
   it('F05_MULTI_TURN_INVESTIGATION writes coalesced text, evidence, and completed-only conversation history', async () => {
     const answer = 'The fixture shows an error. ' + 'Observed evidence. '.repeat(20) + 'End.';
     const conclusion = { summary: 'Observed log evidence', recommendations: [], evidence: [] };

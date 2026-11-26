@@ -1,5 +1,6 @@
 import type { AgentTool, ContextTransform } from '@mini-agent-run/agent';
 import type { LLMProvider } from '@mini-agent-run/ai';
+import type { RunStepLimit } from '@mini-agent-run/shared';
 
 export const DEBUG_AGENT_PACKAGE_NAME = '@mini-agent-run/debug-agent';
 
@@ -20,7 +21,7 @@ export interface DebugAgentConfig {
   model: string;
   tools: readonly AgentTool[];
   transformContext?: ContextTransform;
-  maxSteps?: number;
+  maxSteps?: RunStepLimit;
   providerName?: string;
   systemPrompt?: string;
   maxInlineToolBytes?: number;

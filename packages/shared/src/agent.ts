@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
   ArtifactIdSchema, IsoDateTimeSchema, MessageIdSchema, NonBlankStringSchema, RunIdSchema,
-  RunStatusSchema, SessionIdSchema, StopReasonSchema, TaskOutcomeSchema, ToolCallIdSchema,
+  RunStatusSchema, RunStepLimitSchema, SessionIdSchema, StopReasonSchema, TaskOutcomeSchema, ToolCallIdSchema,
 } from './common.js';
 
 const nonnegative = z.number().int().min(0);
@@ -66,7 +66,7 @@ export const AgentStateSchema = z.object({
   messages: z.array(AgentMessageSchema),
   pendingToolCalls: z.array(PendingToolCallSchema),
   step: nonnegative,
-  maxSteps: positive,
+  maxSteps: RunStepLimitSchema,
   stopReason: StopReasonSchema.nullable(),
   error: AgentErrorSchema.nullable(),
 });
@@ -112,7 +112,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     sessionId: SessionIdSchema,
     prompt: NonBlankStringSchema,
     modelId: NonBlankStringSchema,
-    maxSteps: positive,
+    maxSteps: RunStepLimitSchema,
   }),
   z.object({ type: z.literal('turn_start'), step: positive }),
   z.object({ type: z.literal('message_start'), messageId: MessageIdSchema, role: z.literal('assistant') }),

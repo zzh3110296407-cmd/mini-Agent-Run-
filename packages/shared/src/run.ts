@@ -1,12 +1,12 @@
 import { z } from 'zod';
 import { InvestigationConclusionSchema } from './agent.js';
 import {
-  IsoDateTimeSchema, NonBlankStringSchema, RunIdSchema, RunStatusSchema, SessionIdSchema, StopReasonSchema,
+  IsoDateTimeSchema, NonBlankStringSchema, RunIdSchema, RunStatusSchema, RunStepLimitSchema, SessionIdSchema, StopReasonSchema,
   ToolModeSchema,
 } from './common.js';
 
 const nonnegative = z.number().int().min(0);
-const requestedMaxSteps = z.number().int().min(1).max(30).optional();
+const requestedMaxSteps = z.number().int().min(1).max(30).nullable().optional();
 
 export const InvestigationRunSchema = z.object({
   id: RunIdSchema,
@@ -21,7 +21,7 @@ export const InvestigationRunSchema = z.object({
   modelId: NonBlankStringSchema,
   toolMode: ToolModeSchema,
   stepCount: nonnegative,
-  maxSteps: z.number().int().min(1),
+  maxSteps: RunStepLimitSchema,
   finalAnswer: z.string().nullable(),
   conclusion: InvestigationConclusionSchema.nullable(),
   lastSeq: nonnegative,

@@ -2,7 +2,9 @@ import { z } from 'zod';
 
 export const MAX_INLINE_TOOL_OUTPUT_BYTES = 6144;
 export const MAX_ARTIFACT_SLICE_LINES = 200;
-export const DEFAULT_MAX_STEPS = 12;
+export const DEFAULT_MAX_STEPS = null;
+export const RunStepLimitSchema = z.number().int().min(1).nullable();
+export type RunStepLimit = z.infer<typeof RunStepLimitSchema>;
 
 export const RunStatusSchema = z.enum(['pending', 'running', 'completed', 'stopped', 'failed']);
 export const StopReasonSchema = z.enum(['completed', 'user_abort', 'max_steps', 'error', 'server_restarted']);

@@ -59,7 +59,7 @@ describe('M1.1 public shared schemas', () => {
     expect(shared.APP_NAME).toBe('mini-agent-run');
     expect(shared.MAX_INLINE_TOOL_OUTPUT_BYTES).toBe(6144);
     expect(shared.MAX_ARTIFACT_SLICE_LINES).toBe(200);
-    expect(shared.DEFAULT_MAX_STEPS).toBe(12);
+    expect(shared.DEFAULT_MAX_STEPS).toBeNull();
     const health: shared.HealthResponse = { status: 'ok', service: shared.APP_NAME, timestamp, sqlite: 'ok' };
     expect(shared.HealthResponseSchema.parse(health)).toEqual(health);
     expect(shared.HealthResponseSchema.safeParse({ ...health, sqlite: 'error' }).success).toBe(false);

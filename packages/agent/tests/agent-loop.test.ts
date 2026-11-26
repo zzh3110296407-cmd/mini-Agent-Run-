@@ -101,9 +101,25 @@ describe('[F05_MULTI_TURN_INVESTIGATION] Pi-style agent loop', () => {
       'agent_start', 'turn_start', 'message_start', 'message_update', 'message_update', 'message_end', 'turn_end', 'agent_end',
     ]);
     expect(events.at(-1)).toMatchObject({ status: 'completed', stopReason: 'completed', finalAnswer: '查🙂' });
-    expect(state).toMatchObject({ status: 'completed', step: 1, maxSteps: 12, error: null, pendingToolCalls: [] });
+    expect(state).toMatchObject({ status: 'completed', step: 1, maxSteps: null, error: null, pendingToolCalls: [] });
     expect(state.messages.at(-1)).toMatchObject({ role: 'assistant', content: '查🙂', stopReason: 'stop' });
     expect(AgentStateSchema.parse(state)).toEqual(state);
+    assertBalanced(events);
+  });
+
+  it('continues past twelve steps by default and can still be stopped', async () => {
+    const events: AgentEvent[] = [];
+    const controller = new AbortController();
+    const provider = createMockLLMProvider({ turns: () => ({ toolCalls: [call('inspect')] }) });
+    const state = await runAgentLoop(options(provider, events, {
+      signal: controller.signal, tools: [tool('inspect', async () => ({ content: 'OK', isError: false }))],
+      onEvent(event) {
+        events.push(event);
+        if (event.type === 'turn_end' && event.step === 13) controller.abort();
+      },
+    }));
+    expect(state).toMatchObject({ maxSteps: null, step: 13, status: 'stopped', stopReason: 'user_abort' });
+    expect(provider.recordedRequests).toHaveLength(13);
     assertBalanced(events);
   });
 

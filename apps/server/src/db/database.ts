@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS investigation_runs (
   model_id TEXT NOT NULL,
   tool_mode TEXT NOT NULL CHECK (tool_mode IN ('mock', 'live')),
   step_count INTEGER NOT NULL DEFAULT 0,
-  max_steps INTEGER NOT NULL DEFAULT 12,
+  max_steps INTEGER NOT NULL DEFAULT 0,
   final_answer TEXT,
   conclusion_json TEXT,
   last_seq INTEGER NOT NULL DEFAULT 0,

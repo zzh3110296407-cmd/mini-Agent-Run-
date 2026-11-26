@@ -66,7 +66,7 @@ export function getSessionDetail(db: Database.Database, sessionId: string) {
       SELECT id, session_id AS sessionId, retry_of_run_id AS retryOfRunId, prompt,
              status, stop_reason AS stopReason, error_code AS errorCode, error_message AS errorMessage,
              model_provider AS modelProvider, model_id AS modelId, tool_mode AS toolMode,
-             step_count AS stepCount, max_steps AS maxSteps, final_answer AS finalAnswer,
+             step_count AS stepCount, NULLIF(max_steps, 0) AS maxSteps, final_answer AS finalAnswer,
              conclusion_json AS conclusion, last_seq AS lastSeq, created_at AS createdAt,
              started_at AS startedAt, ended_at AS endedAt, duration_ms AS durationMs
       FROM investigation_runs WHERE session_id = ?

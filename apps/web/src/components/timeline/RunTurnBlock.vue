@@ -59,7 +59,7 @@ function openEvidence(evidence: EvidenceRef) {
         <UiBadge :tone="statusTones[run.status]" :data-run-badge="run.status">
           <UiIcon :name="statusIcons[run.status]" :size="13" />{{ formatRunStatus(run.status) }}
         </UiBadge>
-        <span class="tabular-nums">{{ turn.currentStep }} / {{ run.maxSteps }} 步</span>
+        <span class="tabular-nums">{{ turn.currentStep }}{{ run.maxSteps === null ? '' : ' / ' + run.maxSteps }} 步</span>
         <span v-if="isActive || run.durationMs !== null" class="tabular-nums">
           {{ formatDurationMs(isActive ? elapsedMs : run.durationMs ?? 0) }}
         </span>

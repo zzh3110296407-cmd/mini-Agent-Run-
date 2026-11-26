@@ -1,7 +1,7 @@
 import { LLMProviderError, redactSecret, type LLMMessage, type LLMProvider } from '@mini-agent-run/ai';
 import {
   AgentEventSchema, AgentMessageSchema, AgentStateSchema, DEFAULT_MAX_STEPS, NonBlankStringSchema, ToolCallRequestSchema,
-  type AgentEvent, type AgentMessage, type AgentState, type ToolCallRequest, type ToolMode,
+  type AgentEvent, type AgentMessage, type AgentState, type RunStepLimit, type ToolCallRequest, type ToolMode,
 } from '@mini-agent-run/shared';
 import { randomUUID } from 'node:crypto';
 import { addAbortListener } from 'node:events';
@@ -21,7 +21,7 @@ export interface RunAgentLoopOptions {
   toolMode: ToolMode;
   artifactStore: ArtifactStorePort;
   signal: AbortSignal;
-  maxSteps?: number;
+  maxSteps?: RunStepLimit;
   initialMessages?: readonly AgentMessage[];
   transformContext?: ContextTransform;
   onEvent?: (event: AgentEvent) => Promise<void> | void;
@@ -231,7 +231,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentS
 
   try {
     await emit({ type: 'agent_start', sessionId: state.sessionId, prompt, modelId: state.model.modelId, maxSteps: state.maxSteps });
-    for (let step = 1; step <= state.maxSteps; step++) {
+    for (let step = 1; ; step++) {
       signal.throwIfAborted();
       state.step = step;
       await emit({ type: 'turn_start', step });
@@ -260,5 +260,4 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentS
       : { code: 'AGENT_EXECUTION_ERROR', message: 'The agent run could not complete.' };
     return finish({ status: 'failed', stopReason: 'error', error: failure });
   }
-  throw new Error('The agent loop exited without a terminal state.');
 }

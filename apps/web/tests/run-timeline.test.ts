@@ -363,6 +363,15 @@ describe('F10_TIMELINE_AND_CONTROL_UI 挂载工作台', () => {
     expect(ui.wrapper.find(test('inspector-target-preview')).exists()).toBe(false);
   });
 
+  it('显示无步数上限的实跑步数，并保留历史记录的显式上限', async () => {
+    const legacy = { ...closedRun, status: 'stopped' as const, stepCount: 12, stopReason: 'max_steps' as const, lastSeq: 0 };
+    const uncapped = { ...closedRun, id: 'run_uncapped', stepCount: 14, maxSteps: null, lastSeq: 0 };
+    const ui = await workbench([{ run: legacy, events: [] }, { run: uncapped, events: [] }]);
+    expect(ui.turn(legacy.id).text()).toContain('12 / 12 步');
+    expect(ui.turn(uncapped.id).text()).toContain('14 步');
+    expect(ui.turn(uncapped.id).text()).not.toMatch(/14\s*\//u);
+  });
+
   it('W2-10 48 px 边界内跟随流，离底保持位置，胶囊恢复吸底', async () => {
     const ui = await workbench([{ run: active, events: [] }]);
     const timeline = ui.el('run-timeline-scroll');

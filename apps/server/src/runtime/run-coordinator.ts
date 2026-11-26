@@ -1,7 +1,7 @@
 import { runDebugInvestigation } from '@mini-agent-run/debug-agent';
 import {
   DEFAULT_MAX_STEPS, type AgentEvent, type CreateRunRequest, type InvestigationRun, type RetryRunRequest,
-  type RunEventEnvelope, type Session,
+  type RunEventEnvelope, type RunStepLimit, type Session,
 } from '@mini-agent-run/shared';
 import { createToolRegistry } from '@mini-agent-run/tools';
 import {
@@ -11,6 +11,7 @@ import { createRunRedactor, redactArtifactStore, redactEvent } from './run-redac
 
 type Delta = Extract<AgentEvent, { type: 'message_update' }>;
 type RequestOptions = { apiKeyOverride?: string };
+const legacyDefaultMaxSteps = 12;
 
 interface ActiveRun {
   controller: AbortController;
@@ -170,7 +171,7 @@ export function createRunCoordinator({
     }
   }
 
-  function schedule(session: Session, prompt: string, maxSteps: number, llm: ResolvedLlmProvider, retryOfRunId?: string) {
+  function schedule(session: Session, prompt: string, maxSteps: RunStepLimit, llm: ResolvedLlmProvider, retryOfRunId?: string) {
     const redact = llm.redactor ?? noSecrets;
     const run = store.createRun({
       sessionId: session.id, prompt: redact.text(prompt), maxSteps, toolMode, retryOfRunId,
@@ -286,7 +287,10 @@ export function createRunCoordinator({
       const session = store.getSession(source.sessionId);
       if (!session) throw new RunCoordinatorError('SESSION_NOT_FOUND');
       const llm = resolveProvider(options.apiKeyOverride);
-      return schedule(session, input.prompt ?? source.prompt, input.maxSteps ?? source.maxSteps, llm, runId);
+      const inheritedLimit = source.stopReason === 'max_steps' && source.maxSteps === legacyDefaultMaxSteps
+        ? DEFAULT_MAX_STEPS : source.maxSteps;
+      const limit = input.maxSteps === undefined ? inheritedLimit : input.maxSteps;
+      return schedule(session, input.prompt ?? source.prompt, limit, llm, runId);
     },
     getRunDetail(runId: string) {
       return { run: getRun(runId), events: store.listRunEvents(runId) };

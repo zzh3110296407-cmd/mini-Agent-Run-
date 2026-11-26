@@ -10,7 +10,7 @@ const runFields = `
   id, session_id AS sessionId, retry_of_run_id AS retryOfRunId, prompt,
   status, stop_reason AS stopReason, error_code AS errorCode, error_message AS errorMessage,
   model_provider AS modelProvider, model_id AS modelId, tool_mode AS toolMode,
-  step_count AS stepCount, max_steps AS maxSteps, final_answer AS finalAnswer,
+  step_count AS stepCount, NULLIF(max_steps, 0) AS maxSteps, final_answer AS finalAnswer,
   conclusion_json AS conclusion, last_seq AS lastSeq, created_at AS createdAt,
   started_at AS startedAt, ended_at AS endedAt, duration_ms AS durationMs
 `;
@@ -33,7 +33,7 @@ export function createSqliteRunStore(db: Database.Database): RunStorePort {
   const insertRun = db.prepare<Omit<InsertRunParams, 'retryOfRunId'> & { retryOfRunId: string | null }, RunRow>(`
     INSERT INTO investigation_runs
       (id, session_id, retry_of_run_id, prompt, status, model_provider, model_id, tool_mode, max_steps, created_at)
-    VALUES (@id, @sessionId, @retryOfRunId, @prompt, 'pending', @modelProvider, @modelId, @toolMode, @maxSteps, @now)
+    VALUES (@id, @sessionId, @retryOfRunId, @prompt, 'pending', @modelProvider, @modelId, @toolMode, COALESCE(@maxSteps, 0), @now)
     RETURNING ${runFields}
   `);
   const touchSession = db.prepare(`
