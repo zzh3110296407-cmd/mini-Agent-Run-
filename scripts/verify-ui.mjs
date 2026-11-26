@@ -18,7 +18,7 @@ const mime = { '.html': 'text/html;charset=utf-8', '.js': 'text/javascript;chars
 const actionNames = [
   'create_session', 'switch_session', 'filter_sessions', 'rename_session', 'send_prompt',
   'stop_active_run', 'retry_stopped_run', 'toggle_inspector', 'choose_file', 'search_logs',
-  'jump_error_line', 'toggle_json_view', 'toggle_theme', 'reload_page',
+  'jump_error_line', 'toggle_inspector_fullscreen', 'toggle_theme', 'reload_page',
 ];
 
 function settings() {
@@ -178,14 +178,33 @@ function controls(page) {
     if (!await id('log-inspector-drawer').isVisible()) await id('toggle-inspector-btn').click();
     await expect(id('log-inspector-drawer')).toBeVisible();
     await chooser().click();
-    await id('log-file-option').filter({ hasText: largeLog }).click();
+    const file = id('log-file-option').filter({ hasText: largeLog });
+    const path = await file.getAttribute('data-file-path');
+    assert.ok(path);
+    await file.click();
     await expect(id('log-source-type')).toHaveText('原文件');
+    await expect(page.locator('#inspector-panel .source-name')).toHaveAttribute('title', path);
+
+    const topbar = page.locator('.topbar');
+    const header = page.locator('.session-header');
+    const title = await header.getByRole('heading', { level: 1 }).innerText();
+    const directory = path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')));
+    assert.ok(title && directory);
+    await expect(topbar).not.toContainText(title);
+    await expect(topbar).not.toContainText(directory);
+    await expect(topbar.locator('.topbar-context')).toHaveCount(0);
+    await expect(header).toHaveText(title);
+    await expect(header.locator('code')).toHaveCount(0);
+    await expect(id('high-signal-jump-bar')).toHaveCount(0);
+    await expect(id('log-view-mode-toggle')).toHaveCount(0);
+    const error = id('log-error-jump').and(page.locator('[data-error-line="1100"]'));
+    await expect(error.getByTestId('log-error-preview')).toHaveText(/^(?!\s*\{)\s*\S.+/u);
   }
 
   async function rawLog() {
     await ensureLog();
-    if (await id('log-json-view').isVisible()) await id('log-view-mode-toggle').click();
     await expect(rawRows().first()).toBeVisible();
+    await expect(rawRows().first().getByTestId('log-line-text')).toHaveJSProperty('tagName', 'CODE');
   }
 
   const actions = {
@@ -250,12 +269,36 @@ function controls(page) {
       await expect(rawRows().and(page.locator('[data-line-number="1100"]'))).toHaveAttribute('data-selected', 'true');
       await expect(error).toHaveAttribute('aria-current', 'location');
     },
-    async toggle_json_view() {
+    async toggle_inspector_fullscreen() {
       await ensureLog();
-      const visible = await id('log-json-view').isVisible();
-      await id('log-view-mode-toggle').click();
-      if (visible) await expect(rawRows().first()).toBeVisible();
-      else await expect(id('log-json-view')).toBeVisible();
+      const panel = page.locator('#inspector-panel');
+      const fullscreen = id('inspector-fullscreen-btn');
+      const width = (await panel.boundingBox())?.width;
+      const viewport = page.viewportSize();
+      assert.ok(width && viewport);
+      await fullscreen.click();
+      await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
+      await expect(id('inspector-divider')).toHaveCount(0);
+      await expect(panel).toHaveCSS('position', 'fixed');
+      assert.deepEqual(await panel.boundingBox(), { ...viewport, x: 0, y: 0 });
+
+      await chooser().click();
+      await id('log-file-option').filter({ hasText: 'agent-run-failed.jsonl' }).click();
+      const row = rawRows().and(page.locator('[data-line-number="6"]'));
+      await expect(row).toHaveAttribute('data-level', 'error');
+      await expect(row.locator('.line-number')).toHaveText('6');
+      await expect(row.locator('pre')).toHaveText(/\n {2}"type": "tool_call",/u);
+      const error = id('log-error-jump').and(page.locator('[data-error-line="6"]'));
+      await expect(error.locator('[data-summary-source="extracted"]')).toHaveText('错误提取');
+      await expect(error.getByTestId('log-error-preview')).toHaveText('read_file_slice · The sequence field is absent.');
+
+      await page.keyboard.press('Escape');
+      await expect(fullscreen).toHaveAttribute('aria-pressed', 'false');
+      await expect(id('log-inspector-drawer')).toBeVisible();
+      await expect(id('inspector-divider')).toBeVisible();
+      assert.equal((await panel.boundingBox())?.width, width);
+      await expect(row.locator('pre')).toBeVisible();
+      await ensureLog();
     },
     async toggle_theme() {
       const element = page.locator('html');
