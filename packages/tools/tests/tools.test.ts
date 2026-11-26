@@ -227,6 +227,69 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     });
   });
 
+  it('M5.3-03 R1 resolves scores consistently across trace layouts and prefers explicit outcomes', async () => {
+    const messages = [{ role: 'user', content: 'Check stock' }];
+    const cases = [
+      [{ reward_info: { reward: 0 } }, 'failed'],
+      [{ reward_info: { reward: 1 } }, 'passed'],
+      [{ reward: 0 }, 'failed'],
+      [{ reward: 1 }, 'passed'],
+      [{ reward_info: { reward: 0.5 } }, 'unknown'],
+      [{ taskOutcome: 'passed', reward_info: { reward: 0 } }, 'passed'],
+    ] as const;
+    const samples = cases.flatMap(([outcome, expected], index) => {
+      const run = { termination_reason: 'user_stop', messages, ...outcome };
+      return [run, { runs: [run] }].map((value, layout) => ({
+        file: 'score-' + index + '-' + (layout === 0 ? 'root' : 'nested') + '.json',
+        raw: JSON.stringify(value), expected,
+      }));
+    });
+    const { call } = build(Object.fromEntries(samples.map(({ file, raw }) => [file, raw])));
+    for (const { file, expected } of samples) {
+      const result = await call('inspect_trace', { file });
+      expect(result.isError, file).toBe(false);
+      expect(result.data, file).toMatchObject({
+        stepCount: 1, threeState: { terminationReason: 'user_stop', taskOutcome: expected },
+      });
+    }
+  });
+
+  it.each(['object', 'string'] as const)('M5.3-03 R2 agrees with the error index for tool results encoded as %s', async (representation) => {
+    const payload = { error: 'Stock unavailable', status: 'failed' };
+    const samples = [undefined, false].map((isError) => ({
+      file: isError === false ? 'explicit-success.json' : 'failure.json',
+      expectedFailure: isError !== false,
+      raw: JSON.stringify({ runs: [{ messages: [
+        { turn_idx: 0, role: 'assistant', tool_calls: [{ id: 'stock', name: 'get_stock', arguments: {} }] },
+        { turn_idx: 1, role: 'tool', tool_call_id: 'stock', name: 'get_stock',
+          content: representation === 'object' ? payload : JSON.stringify(payload), isError },
+      ] }] }, null, 2).replaceAll('\n', '\r\n'),
+    }));
+    const { call } = build(Object.fromEntries(samples.map(({ file, raw }) => [file, raw])));
+    for (const { file, raw, expectedFailure } of samples) {
+      const result = await call('inspect_trace', { file });
+      expect(result.isError, file).toBe(false);
+      expect(result.data).toMatchObject({
+        threeState: { hasToolError: expectedFailure, toolErrorCount: expectedFailure ? 1 : 0 },
+        toolCalls: [{ step: 0, toolName: 'get_stock', isError: expectedFailure }],
+      });
+      const lines = raw.split('\r\n');
+      const classify = createTraceLineClassifier(raw);
+      const marked = lines.flatMap((line, index) => classify(line, index + 1) === 'error' ? [index + 1] : []);
+      const firstError = result.data.anomalies.firstError;
+      if (expectedFailure) {
+        const marker = representation === 'object' ? '"error": "Stock unavailable"' : '"content": "{';
+        const line = lines.findIndex((text) => text.includes(marker)) + 1;
+        expect(line).toBeGreaterThan(0);
+        expect(firstError).toEqual({ step: 1, line, snippet: lines[line - 1]?.trim() });
+        expect(marked).toEqual([line]);
+      } else {
+        expect(firstError).toBeNull();
+        expect(marked).toEqual([]);
+      }
+    }
+  });
+
   it('uses explicit tool success and retains structured and legacy text failures', async () => {
     const fixtures = [
       ['success.json', '{"ok":true,"error":null}', false, 0],

@@ -102,6 +102,10 @@ function rewardOutcome(value: unknown): Outcome | undefined {
   return value === 1 ? 'passed' : value === 0 ? 'failed' : undefined;
 }
 
+function scoredOutcome(run: TraceObject | undefined) {
+  return rewardOutcome(asObject(run?.reward_info)?.reward) ?? rewardOutcome(run?.reward);
+}
+
 function reason(row: TraceObject | undefined) {
   return firstText(row, ['termination_reason', 'terminationReason', 'stop_reason', 'stopReason']);
 }
@@ -137,20 +141,28 @@ function structuredFailureField(row: TraceObject) {
   if (row.ok === false) return 'ok';
 }
 
-function errorEvidenceField(row: TraceObject, body: string, bodyField: string | undefined) {
+function errorEvidencePath(row: TraceObject): JsonPath | undefined {
   const structured = recordedError(row);
-  if (structured) return structured.failed ? structured.field : undefined;
-  if (!isToolMessage(row) || bodyField === undefined) return;
+  if (structured) return structured.failed ? [structured.field] : undefined;
+  if (!isToolMessage(row)) return;
+  const bodyField = ['content', 'text', 'message'].find((key) => text(row[key]) || asObject(row[key]));
+  if (bodyField === undefined) return;
+  const payload = asObject(row[bodyField]);
+  if (payload) {
+    const field = structuredFailureField(payload);
+    return field === undefined ? undefined : [bodyField, field];
+  }
+  const body = text(row[bodyField]) ?? '';
   const first = body.trimStart().charAt(0);
   if (first === '{' || first === '[') {
     try {
-      const payload = asObject(JSON.parse(body));
-      return payload && structuredFailureField(payload) !== undefined ? bodyField : undefined;
+      const parsed = asObject(JSON.parse(body));
+      return parsed && structuredFailureField(parsed) !== undefined ? [bodyField] : undefined;
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
     }
   }
-  return strongError.test(body) ? bodyField : undefined;
+  return strongError.test(body) ? [bodyField] : undefined;
 }
 
 function firstEvidence(
@@ -185,15 +197,12 @@ function declaredLevel(value: unknown): LogLevel {
 }
 
 function* logLevelEvidence(row: TraceObject): IterableIterator<{ level: LogLevel; path: JsonPath }> {
-  const bodyField = ['content', 'text', 'message'].find((key) => text(row[key]) || asObject(row[key]));
-  const body = bodyField === undefined ? undefined : row[bodyField];
-  const payload = isToolMessage(row) ? asObject(body) : undefined;
-  const payloadFailure = payload && structuredFailureField(payload);
-  const failure = errorEvidenceField(row, text(body) ?? '', bodyField) ?? structuredFailureField(row);
-  if (failure !== undefined) {
-    yield { level: 'error', path: [failure] };
-  } else if (bodyField !== undefined && payloadFailure !== undefined && !recordedError(row)) {
-    yield { level: 'error', path: [bodyField, payloadFailure] };
+  const path = errorEvidencePath(row);
+  const declared = path === undefined ? structuredFailureField(row) : undefined;
+  if (path !== undefined) {
+    yield { level: 'error', path };
+  } else if (declared !== undefined) {
+    yield { level: 'error', path: [declared] };
   } else {
     const levelField = text(row.level) ? 'level' : 'severity';
     const level = declaredLevel(row[levelField]);
@@ -288,8 +297,8 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
   let runEndReason: string | undefined;
   let observedReason: string | undefined;
   const declaredOutcome = [
-    findOutcome(root, true), rewardOutcome(metadata?.reward), findOutcome(metadata, true),
-    rewardOutcome(asObject(primaryRun?.reward_info)?.reward), rewardOutcome(primaryRun?.reward), findOutcome(primaryRun, true),
+    findOutcome(root, true), findOutcome(metadata, true), scoredOutcome(root), scoredOutcome(metadata),
+    findOutcome(primaryRun, true), scoredOutcome(primaryRun),
   ].find((outcome) => outcome !== undefined && outcome !== 'unknown');
   let taskOutcome: Outcome | undefined = declaredOutcome;
   const records = indexedRecords(trace);
@@ -297,14 +306,13 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
   for (const { row, span, record } of records) {
     if (!row) continue;
     const { step } = record;
-    const bodyField = ['content', 'text', 'message'].find((key) => text(row[key]) !== undefined);
-    const body = bodyField === undefined ? '' : text(row[bodyField]) ?? '';
+    const body = firstText(row, ['content', 'text', 'message']) ?? '';
     const name = callName(row);
     const id = firstText(row, ['toolCallId', 'tool_call_id', 'callId'])
       ?? (isToolMessage(row) ? text(row.id) : undefined);
     const eventType = firstText(row, ['type', 'event_type', 'eventType']);
-    const evidenceField = errorEvidenceField(row, body, bodyField);
-    const failed = evidenceField !== undefined;
+    const evidencePath = errorEvidencePath(row);
+    const failed = evidencePath !== undefined;
     const explicitResult = /(?:result|execution_end|completed|failed)$/.test(eventType ?? '') || row.role === 'tool';
     const callsField = Array.isArray(row.toolCalls) ? 'toolCalls' : 'tool_calls';
     const listed = row[callsField];
@@ -349,8 +357,7 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
     }
     if (explicitResult && matchingResult) reported.add(matchingResult);
     if (firstError === null && (failed || failedCallIndex !== undefined)) {
-      const paths: JsonPath[] = [];
-      if (evidenceField !== undefined) paths.push([evidenceField]);
+      const paths: JsonPath[] = evidencePath === undefined ? [] : [evidencePath];
       if (failedCallIndex !== undefined) paths.push([callsField, failedCallIndex, 'isError']);
       firstError = firstEvidence(trace.sanitized, span, record, body, paths);
     }
