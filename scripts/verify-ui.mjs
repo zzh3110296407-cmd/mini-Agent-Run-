@@ -298,6 +298,36 @@ function controls(page) {
       await expect(id('inspector-divider')).toBeVisible();
       assert.equal((await panel.boundingBox())?.width, width);
       await expect(row.locator('pre')).toBeVisible();
+
+      await page.setViewportSize({ ...viewport, width: 1100 });
+      try {
+        const divider = id('inspector-divider');
+        await expect(panel).toHaveAttribute('role', 'dialog');
+        await expect(panel).toHaveCSS('animation-name', 'none');
+        await expect(divider).toHaveAttribute('aria-valuemax', '1052');
+        const initialWidth = Number(await divider.getAttribute('aria-valuenow'));
+        assert.ok(initialWidth > 0 && initialWidth < 1052);
+        async function dragDivider(destinationX) {
+          const box = await divider.boundingBox();
+          assert.ok(box);
+          const x = box.x + box.width / 2;
+          const y = box.y + box.height / 2;
+          await page.mouse.move(x, y);
+          await page.mouse.down();
+          try {
+            await page.mouse.move(destinationX(x), y);
+          } finally {
+            await page.mouse.up();
+          }
+        }
+        await dragDivider(() => 0);
+        await expect(panel).toBeVisible();
+        await expect(divider).toHaveAttribute('aria-valuenow', '1052');
+        await dragDivider((x) => x + 1052 - initialWidth);
+        await expect(divider).toHaveAttribute('aria-valuenow', String(initialWidth));
+      } finally {
+        await page.setViewportSize(viewport);
+      }
       await ensureLog();
     },
     async toggle_theme() {

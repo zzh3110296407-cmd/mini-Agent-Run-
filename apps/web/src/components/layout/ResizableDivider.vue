@@ -26,6 +26,13 @@ function endDrag() {
   window.removeEventListener('mousemove', move);
   window.removeEventListener('mouseup', endDrag);
   window.removeEventListener('blur', endDrag);
+  window.removeEventListener('pointercancel', endDrag);
+}
+
+function captureDragPointer(event: PointerEvent) {
+  if (event.isPrimary && event.pointerType === 'mouse' && event.button === 0 && event.currentTarget instanceof HTMLElement) {
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
 }
 
 function startDrag(event: MouseEvent) {
@@ -37,6 +44,7 @@ function startDrag(event: MouseEvent) {
   window.addEventListener('mousemove', move);
   window.addEventListener('mouseup', endDrag);
   window.addEventListener('blur', endDrag);
+  window.addEventListener('pointercancel', endDrag);
 }
 
 onBeforeUnmount(endDrag);
@@ -47,7 +55,8 @@ onBeforeUnmount(endDrag);
     class="divider" :class="{ dragging }" data-testid="inspector-divider" role="separator" aria-orientation="vertical"
     aria-label="调整检视器宽度" aria-controls="inspector-panel" :aria-valuenow="width"
     :aria-valuemin="minInspectorWidth" :aria-valuemax="maxWidth" tabindex="0"
-    @mousedown="startDrag" @keydown.left.prevent="resize(width + 24)" @keydown.right.prevent="resize(width - 24)"
+    @pointerdown="captureDragPointer" @mousedown="startDrag"
+    @keydown.left.prevent="resize(width + 24)" @keydown.right.prevent="resize(width - 24)"
   >
     <UiIcon name="grip-vertical" :size="12" />
   </div>

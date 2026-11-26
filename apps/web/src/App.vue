@@ -251,7 +251,10 @@ onUnmounted(() => {
     </UiSheet>
     <UiDialog
       v-if="viewport !== 'desktop'" id="inspector-panel" :open="inspectorOpen" side="right" title="日志检视器"
-      class="inspector-sheet" :class="{ 'inspector-fullscreen': inspectorFullscreen }"
+      class="inspector-sheet" :class="{
+        'inspector-resizable': viewport === 'tablet',
+        'inspector-fullscreen': inspectorFullscreen,
+      }"
       :style="{ '--inspector-sheet-width': viewport === 'mobile' ? '100vw' : inspectorWidth + 'px' }"
       @close="inspectorOpen = false"
     >
@@ -297,6 +300,7 @@ onUnmounted(() => {
 .inspector-header h2 { margin: 0 auto 0 0; font-size: 13px; }
 .inspector-sheet-title { flex: 1; }
 :global(.ui-overlay.right > .ui-dialog.inspector-sheet) { width: var(--inspector-sheet-width); }
+:global(.ui-overlay.right > .ui-dialog.inspector-resizable) { animation: none; }
 :global(#inspector-panel.inspector-fullscreen) { position: fixed; inset: 0; width: 100%; max-width: none; z-index: var(--z-drawer); animation: none; }
 .inspector-sheet-body { display: flex; min-height: 0; height: 100%; }
 .inspector-empty { margin: 12px; }
