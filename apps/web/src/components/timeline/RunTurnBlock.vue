@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { EvidenceRef, InvestigationRun, RunId } from '@mini-agent-run/shared';
-import { computed, ref, useId } from 'vue';
+import { computed, ref, useId, watch } from 'vue';
 import type { InspectorTargetRequest } from '../../composables/useRunStream';
 import { formatDurationMs, formatRunStatus, formatStopReason } from '../../utils/formatters';
 import { evidenceInspectorTarget } from '../../utils/inspectorTargets';
@@ -34,8 +34,22 @@ const canRetry = computed(() => run.value.status === 'stopped' || run.value.stat
 const detailsOpen = ref(false);
 const expanded = ref(new Set<number>());
 const detailsId = useId();
+const thinkingId = useId();
+const thinkingOpen = ref(false);
+const userToggledThinking = ref(false);
 const statusTones = { pending: 'neutral', running: 'running', completed: 'completed', stopped: 'stopped', failed: 'failed' } as const;
 const statusIcons = { pending: 'clock', running: 'loader', completed: 'check-circle', stopped: 'square', failed: 'x-circle' } as const;
+
+watch([() => props.turn.isThinking, () => props.turn.streamText, isActive], ([thinking, text, active]) => {
+  if (userToggledThinking.value) return;
+  if (!active || text !== '') thinkingOpen.value = false;
+  else if (thinking) thinkingOpen.value = true;
+}, { immediate: true });
+
+function toggleThinking() {
+  userToggledThinking.value = true;
+  thinkingOpen.value = !thinkingOpen.value;
+}
 
 function toggle(key: number) {
   if (expanded.value.has(key)) expanded.value.delete(key);
@@ -68,8 +82,19 @@ function openEvidence(evidence: EvidenceRef) {
           @click="emit('jumpRun', run.retryOfRunId)"
         >原排查 <code>#{{ run.retryOfRunId }}</code></UiButton>
       </div>
+      <div v-if="turn.reasoningText !== ''" class="thinking-panel" data-testid="thinking-panel">
+        <UiButton
+          variant="ghost" size="sm" data-testid="thinking-toggle" :aria-expanded="thinkingOpen" :aria-controls="thinkingId"
+          @click="toggleThinking"
+        >
+          <UiIcon :name="thinkingOpen ? 'chevron-down' : 'chevron-right'" :size="14" />
+          <span v-if="turn.isThinking" class="activity-dot" aria-hidden="true" />
+          {{ turn.isThinking ? '正在深度思考…' : '思考过程' }}
+        </UiButton>
+        <div v-show="thinkingOpen" :id="thinkingId" class="thinking-content" data-testid="thinking-content">{{ turn.reasoningText }}</div>
+      </div>
       <SafeMarkdownView v-if="turn.streamText !== ''" :content="turn.streamText" />
-      <p v-else-if="isActive && !turn.activeTool" class="muted">等待模型输出…</p>
+      <p v-else-if="isActive && !turn.activeTool && !turn.isThinking" class="muted">等待模型输出…</p>
       <div v-if="isActive && turn.activeTool" class="active-tool" data-testid="active-tool-status" role="status">
         <span class="activity-dot" aria-hidden="true" />
         <span>正在执行 <code>{{ turn.activeTool.toolName }}</code></span>
@@ -127,6 +152,9 @@ function openEvidence(evidence: EvidenceRef) {
 .muted { margin: 0; color: var(--text-secondary); }
 .active-tool { flex-wrap: nowrap; padding: 5px 7px; border: 1px solid var(--status-running-border); border-radius: var(--radius-sm); background: var(--status-running-bg); }
 .activity-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--status-running-dot); animation: pulse 1.6s ease-in-out infinite; }
+.thinking-panel { min-width: 0; padding: 3px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); }
+.thinking-content { max-height: 280px; overflow-y: auto; padding: 4px 8px 8px; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .activity-dot { animation: none; } }
 .progress { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-elapsed { margin-inline-start: auto; }
 .tools { display: grid; gap: 5px; margin-top: 4px; }

@@ -24,12 +24,14 @@ export type ActiveTool = Pick<ToolCallViewItem, 'toolCallId' | 'toolName' | 'ste
 export type JumpTarget = Pick<ToolCallViewItem, 'key' | 'toolCallId' | 'step' | 'artifactId' | 'fileTarget'> & { line?: number };
 export type HighSignalTargets = { firstError: JumpTarget | null; retryLoop: JumpTarget | null; slowTool: JumpTarget | null };
 
-type AssistantText = { id: string; text: string };
+type AssistantText = { id: string; text: string; reasoning: string };
 export type RunTurnViewModel = {
   run: InvestigationRun;
   lastSeq: number;
   currentStep: number;
   streamText: string;
+  reasoningText: string;
+  isThinking: boolean;
   activeTool: ActiveTool | null;
   toolCalls: ToolCallViewItem[];
   conclusion: InvestigationConclusion | null;
@@ -129,12 +131,22 @@ function deriveHighSignals(tools: readonly ToolCallViewItem[]): HighSignalTarget
   return { firstError, retryLoop, slowTool };
 }
 
-function textChange(model: RunTurnViewModel, id: string, text: string, append: boolean) {
+function assistantChange(
+  model: RunTurnViewModel, id: string, update: (message: AssistantText) => Partial<AssistantText>,
+) {
   const index = model.messages.findIndex((message) => message.id === id);
-  const previous = model.messages[index];
-  const message = { id, text: append ? (previous?.text ?? '') + text : text };
-  const messages = previous ? model.messages.map((value, position) => position === index ? message : value) : [...model.messages, message];
-  return { ...model, messages, streamText: messages.map((value) => value.text).filter((value) => value !== '').join('\n\n') };
+  const previous = model.messages[index] ?? { id, text: '', reasoning: '' };
+  const message = { ...previous, ...update(previous) };
+  const messages = [...model.messages];
+  if (index < 0) messages.push(message);
+  else messages[index] = message;
+  return {
+    ...model, messages,
+    streamText: message.text === previous.text ? model.streamText
+      : messages.map(({ text }) => text).filter(Boolean).join('\n\n'),
+    reasoningText: message.reasoning === previous.reasoning ? model.reasoningText
+      : messages.map(({ reasoning }) => reasoning).filter(Boolean).join('\n\n'),
+  };
 }
 
 type ToolEvent = Extract<AgentEvent, { type: 'tool_execution_start' | 'tool_execution_update' | 'tool_execution_end' }>;
@@ -150,7 +162,10 @@ function applyTool(model: RunTurnViewModel, event: ToolEvent): RunTurnViewModel 
       key: model.lastSeq, toolCallId, toolName, step, arguments: event.arguments, status: 'running', elapsedMs: 0,
       artifactId: artifact.success ? artifact.data : undefined, fileTarget: fileFromArguments(event.arguments),
     });
-    return { ...model, activeTool: { toolCallId, toolName, step, elapsedMs: 0 }, toolCalls, highSignals: deriveHighSignals(toolCalls) };
+    return {
+      ...model, isThinking: false, activeTool: { toolCallId, toolName, step, elapsedMs: 0 },
+      toolCalls, highSignals: deriveHighSignals(toolCalls),
+    };
   }
 
   const step = event.type === 'tool_execution_end' ? event.step : activeTool?.step;
@@ -192,11 +207,29 @@ export function applyRunEventEnvelope(model: RunTurnViewModel, envelope: RunEven
       return { ...next, currentStep, run: { ...run, stepCount: currentStep } };
     }
     case 'message_start':
-      return model.messages.some(({ id }) => id === event.messageId) ? next : textChange(next, event.messageId, '', false);
-    case 'message_update':
-      return event.deltaType === 'text_delta' ? textChange(next, event.messageId, event.delta, true) : next;
-    case 'message_end':
-      return textChange(next, event.message.id, event.message.content, false);
+      return model.messages.some(({ id }) => id === event.messageId)
+        ? next : assistantChange({ ...next, isThinking: false }, event.messageId, () => ({}));
+    case 'message_update': {
+      if (event.deltaType === 'text_delta') {
+        return assistantChange({ ...next, isThinking: false }, event.messageId, (message) => ({
+          text: message.text + event.delta,
+        }));
+      }
+      if (event.deltaType !== 'reasoning_delta') return next;
+      const updated = assistantChange(next, event.messageId, (message) => ({ reasoning: message.reasoning + event.delta }));
+      const latest = updated.messages.at(-1);
+      return {
+        ...updated,
+        isThinking: !updated.activeTool && latest?.id === event.messageId && latest.text === '' && latest.reasoning !== '',
+      };
+    }
+    case 'message_end': {
+      const { id, content, reasoningContent } = event.message;
+      return assistantChange({ ...next, isThinking: false }, id, () => ({
+        text: content,
+        ...(reasoningContent === undefined ? {} : { reasoning: reasoningContent }),
+      }));
+    }
     case 'tool_execution_start':
     case 'tool_execution_update':
     case 'tool_execution_end':
@@ -209,7 +242,8 @@ export function applyRunEventEnvelope(model: RunTurnViewModel, envelope: RunEven
           finalAnswer: event.finalAnswer ?? null, conclusion: event.conclusion ?? null,
           errorCode: event.error?.code ?? null, errorMessage: event.error?.message ?? null,
         },
-        activeTool: null, streamText: event.finalAnswer ?? next.streamText, conclusion: event.conclusion ?? null, error: event.error ?? null,
+        isThinking: false, activeTool: null, streamText: event.finalAnswer ?? next.streamText,
+        conclusion: event.conclusion ?? null, error: event.error ?? null,
       };
   }
 }
@@ -217,13 +251,14 @@ export function applyRunEventEnvelope(model: RunTurnViewModel, envelope: RunEven
 export function createRunTurnViewModel(run: InvestigationRun, events: readonly RunEventEnvelope[] = []): RunTurnViewModel {
   const initial: RunTurnViewModel = {
     run: { ...run, status: isActiveRunStatus(run.status) ? run.status : 'pending' },
-    lastSeq: 0, currentStep: run.stepCount, streamText: '', activeTool: null, toolCalls: [], conclusion: null, error: null,
+    lastSeq: 0, currentStep: run.stepCount, streamText: '', reasoningText: '', isThinking: false,
+    activeTool: null, toolCalls: [], conclusion: null, error: null,
     highSignals: { firstError: null, retryLoop: null, slowTool: null }, messages: [],
   };
   const replay = events.reduce(applyRunEventEnvelope, initial);
   if (isActiveRunStatus(run.status)) return replay;
   return {
-    ...replay, run, activeTool: null, streamText: run.finalAnswer ?? replay.streamText,
+    ...replay, run, isThinking: false, activeTool: null, streamText: run.finalAnswer ?? replay.streamText,
     conclusion: run.conclusion ?? replay.conclusion,
     error: run.errorCode && run.errorMessage ? { code: run.errorCode, message: run.errorMessage } : replay.error,
   };

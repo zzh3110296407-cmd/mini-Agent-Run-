@@ -113,11 +113,91 @@ afterEach(() => {
 });
 
 const delta = (text: string): AgentEvent => ({ type: 'message_update', messageId: 'msg_flow', deltaType: 'text_delta', delta: text });
+const reason = (text: string, messageId = 'msg_flow'): AgentEvent => ({
+  type: 'message_update', messageId, deltaType: 'reasoning_delta', delta: text,
+});
 const finish = (event: Partial<Extract<AgentEvent, { type: 'agent_end' }>> = {}): AgentEvent => ({
   type: 'agent_end', status: 'completed', stopReason: 'completed', durationMs: 2350, ...event,
 });
 
 describe('F10_TIMELINE_AND_CONTROL_UI 挂载工作台', () => {
+  it('T3-10 思考流自动展开，正文到达后折叠且文本互不混入', async () => {
+    const ui = await workbench([{ run: active, events: [] }]);
+    expect(ui.wrapper.find(test('thinking-panel')).exists()).toBe(false);
+    await ui.emit(run.id, 1, reason('先检查依据。'));
+    await ui.emit(run.id, 2, reason('\n再重新计算。'));
+    const toggle = ui.el('thinking-toggle');
+    const text = ui.el('thinking-content');
+    expect(toggle.text()).toBe('正在深度思考…');
+    expect(toggle.attributes('aria-expanded')).toBe('true');
+    expect(toggle.attributes('aria-controls')).toBe(text.attributes('id'));
+    expect(text.isVisible()).toBe(true);
+    expect(text.element.textContent).toBe('先检查依据。\n再重新计算。');
+    expect(ui.wrapper.find(test('safe-markdown-view')).exists()).toBe(false);
+    await ui.emit(run.id, 3, delta('结论正文'));
+    await ui.emit(run.id, 4, reason('延迟思考分片'));
+    expect(toggle.text()).toBe('思考过程');
+    expect(toggle.attributes('aria-expanded')).toBe('false');
+    expect(text.isVisible()).toBe(false);
+    expect(ui.el('safe-markdown-view').text()).toBe('结论正文');
+    await ui.emit(run.id, 5, finish({ finalAnswer: '最终正文' }));
+    expect(toggle.attributes('aria-expanded')).toBe('false');
+    expect(ui.el('safe-markdown-view').text()).toBe('最终正文');
+  });
+
+  it('T3-10 工具执行停止思考状态，终态自动关闭，手动选择保持优先', async () => {
+    const ui = await workbench([{ run: active, events: [] }]);
+    await ui.emit(run.id, 1, reason('第一轮'));
+    const toggle = ui.el('thinking-toggle');
+    await ui.emit(run.id, 2, {
+      type: 'tool_execution_start', toolCallId: 'tc_read', toolName: 'read_file_slice', step: 1, arguments: {},
+    });
+    expect(toggle.text()).toBe('思考过程');
+    await ui.emit(run.id, 3, {
+      type: 'tool_execution_end', toolCallId: 'tc_read', toolName: 'read_file_slice', step: 1,
+      durationMs: 3, isError: false, preview: '已读',
+    });
+    await ui.emit(run.id, 4, reason('第二轮', 'msg_second'));
+    expect(toggle.text()).toBe('正在深度思考…');
+    await toggle.trigger('click');
+    await ui.emit(run.id, 5, reason('补充', 'msg_second'));
+    expect(toggle.attributes('aria-expanded')).toBe('false');
+    await toggle.trigger('click');
+    await ui.emit(run.id, 6, delta('切换到正文'));
+    await ui.emit(run.id, 7, finish({ finalAnswer: '已完成' }));
+    expect(toggle.attributes('aria-expanded')).toBe('true');
+    expect(ui.el('thinking-content').element.textContent).toBe('第一轮\n\n第二轮补充');
+
+    const auto = await workbench([{ run: active, events: [] }]);
+    await auto.emit(run.id, 1, reason('停止之前'));
+    expect(auto.el('thinking-toggle').attributes('aria-expanded')).toBe('true');
+    await auto.emit(run.id, 2, finish({ status: 'stopped', stopReason: 'user_abort' }));
+    expect(auto.el('thinking-toggle').attributes('aria-expanded')).toBe('false');
+  });
+
+  it('T3-10/T3-11 回放终态思考的完整纯文本且不注入节点', async () => {
+    const hostile = '<script>alert(1)</script><img src=x onerror=alert(1)>\n<iframe src=x></iframe>';
+    const ui = await workbench([{ run: { ...closedRun, lastSeq: 4, finalAnswer: '记录正文' }, events: [
+      frame(1, reason(hostile.slice(0, 12))),
+      frame(2, { type: 'message_end', message: {
+        role: 'assistant', id: 'msg_flow', content: '', createdAt: now, toolCalls: [], reasoningContent: hostile,
+      } }),
+      frame(3, { type: 'message_end', message: {
+        role: 'assistant', id: 'msg_next', content: '记录正文', createdAt: now, toolCalls: [], reasoningContent: '尾段',
+      } }),
+      frame(4, finish({ finalAnswer: '记录正文' })),
+    ] }]);
+    const toggle = ui.el('thinking-toggle');
+    expect(toggle.text()).toBe('思考过程');
+    expect(toggle.attributes('aria-expanded')).toBe('false');
+    await toggle.trigger('click');
+    const content = ui.el('thinking-content');
+    expect(content.isVisible()).toBe(true);
+    expect(content.element.textContent).toBe(hostile + '\n\n尾段');
+    expect(content.findAll('script, img, iframe')).toHaveLength(0);
+    expect(ui.el('safe-markdown-view').text()).toBe('记录正文');
+  });
+
   it('W2-03 开放式空会话，保留斜杠和组合输入，只由普通 Enter 提交', async () => {
     const ui = await workbench();
     const empty = ui.el('empty-session-guide');
