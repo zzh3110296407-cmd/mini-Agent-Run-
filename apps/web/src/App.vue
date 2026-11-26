@@ -183,7 +183,7 @@ onUnmounted(() => {
   <div class="workbench" :data-layout="viewport">
     <AppTopbar
       :theme="theme" :health="health" :show-sidebar-toggle="viewport === 'mobile'" :sidebar-open="sidebarDrawerOpen"
-      :inspector-open="inspectorOpen" :session-title="summary?.session.title" :target-path="summary?.session.targetPath"
+      :inspector-open="inspectorOpen"
       @retry-health="checkHealth" @toggle-theme="toggleTheme" @toggle-sidebar="toggleSidebarDrawer" @toggle-inspector="toggleInspector"
     />
     <div class="workbench-body">

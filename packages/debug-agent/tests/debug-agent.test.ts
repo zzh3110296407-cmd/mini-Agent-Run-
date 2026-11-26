@@ -268,6 +268,8 @@ describe('[F05_MULTI_TURN_INVESTIGATION] debug prompt and tolerant conclusion ex
       expect(prompt).toContain(name);
     }
     expect(prompt).toContain('three independent signals');
+    expect(prompt).toContain('Optional errorSummaries');
+    expect(prompt).toContain('"file":"trace.jsonl","line":6');
     expect(prompt).toContain('演示 session.log');
     expect(prompt).toContain('target kind is file');
     expect(prompt).toContain('Keep the answer concise.');
@@ -288,6 +290,14 @@ describe('[F05_MULTI_TURN_INVESTIGATION] debug prompt and tolerant conclusion ex
     expect(extractInvestigationConclusion(raw)).toEqual({
       conclusion: exampleConclusion, cleanedAnswer: ['Human answer', '', example, 'Tail'].join('\r\n'),
     });
+  });
+
+  it('retains observed error-line summaries when extracting the conclusion', () => {
+    const conclusion = {
+      ...exampleConclusion, errorSummaries: [{ file: 'trace.jsonl', line: 6, summary: '工具查询失败' }],
+    };
+    expect(extractInvestigationConclusion('排查结束。\n\n' + conclusionFence(conclusion)))
+      .toEqual({ cleanedAnswer: '排查结束。', conclusion });
   });
 
   it.each([['LF', '\n'], ['CRLF', '\r\n']])('preserves literal log line numbers in %s fences around the selected conclusion', (_style, newline) => {

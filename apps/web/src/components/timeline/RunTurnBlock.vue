@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import type { EvidenceRef, InvestigationRun, RunId } from '@mini-agent-run/shared';
-import { computed, nextTick, ref, useId } from 'vue';
+import { computed, ref, useId } from 'vue';
 import type { InspectorTargetRequest } from '../../composables/useRunStream';
 import { formatDurationMs, formatRunStatus, formatStopReason } from '../../utils/formatters';
-import { evidenceInspectorTarget, toolInspectorTarget } from '../../utils/inspectorTargets';
-import { isActiveRunStatus, type JumpTarget, type RunTurnViewModel } from '../../utils/runTimelineReducer';
+import { evidenceInspectorTarget } from '../../utils/inspectorTargets';
+import { isActiveRunStatus, type RunTurnViewModel } from '../../utils/runTimelineReducer';
 import UiBadge from '../ui/UiBadge.vue';
 import UiButton from '../ui/UiButton.vue';
 import UiIcon from '../ui/UiIcon.vue';
 import ConclusionCard from './ConclusionCard.vue';
-import HighSignalJumpBar from './HighSignalJumpBar.vue';
 import SafeMarkdownView from './SafeMarkdownView.vue';
 import ToolCallCollapsible from './ToolCallCollapsible.vue';
 
@@ -27,7 +26,6 @@ const emit = defineEmits<{
   retry: [id: RunId];
   editRetry: [run: InvestigationRun];
   jumpRun: [id: RunId];
-  holdScroll: [];
   openInspector: [target: InspectorTargetRequest];
 }>();
 const run = computed(() => props.turn.run);
@@ -35,8 +33,6 @@ const isActive = computed(() => isActiveRunStatus(run.value.status));
 const canRetry = computed(() => run.value.status === 'stopped' || run.value.status === 'failed');
 const detailsOpen = ref(false);
 const expanded = ref(new Set<number>());
-const tools = ref<HTMLElement | null>(null);
-const toolHighlight = ref<number | null>(null);
 const detailsId = useId();
 const statusTones = { pending: 'neutral', running: 'running', completed: 'completed', stopped: 'stopped', failed: 'failed' } as const;
 const statusIcons = { pending: 'clock', running: 'loader', completed: 'check-circle', stopped: 'square', failed: 'x-circle' } as const;
@@ -50,18 +46,6 @@ function openEvidence(evidence: EvidenceRef) {
   emit('openInspector', evidenceInspectorTarget(run.value.sessionId, evidence));
 }
 
-async function jumpToTool(target: JumpTarget, label: string) {
-  emit('holdScroll');
-  detailsOpen.value = true;
-  expanded.value.add(target.key);
-  toolHighlight.value = target.key;
-  await nextTick();
-  const card = tools.value?.querySelector<HTMLElement>('[data-tool-key="' + target.key + '"]');
-  card?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
-  card?.querySelector<HTMLButtonElement>('[data-testid="tool-toggle-btn"]')?.focus({ preventScroll: true });
-  const request = toolInspectorTarget(run.value.sessionId, target, label);
-  if (request) emit('openInspector', request);
-}
 </script>
 
 <template>
@@ -93,7 +77,6 @@ async function jumpToTool(target: JumpTarget, label: string) {
         <span class="tool-elapsed tabular-nums">{{ formatDurationMs(turn.activeTool.elapsedMs) }}</span>
       </div>
       <ConclusionCard v-if="turn.conclusion" :conclusion="turn.conclusion" @open-evidence="openEvidence" />
-      <HighSignalJumpBar :signals="turn.highSignals" @jump="jumpToTool" />
       <div v-if="turn.toolCalls.length" class="run-details">
         <UiButton
           variant="ghost" size="sm" data-testid="run-details-toggle" :aria-expanded="detailsOpen" :aria-controls="detailsId"
@@ -102,9 +85,9 @@ async function jumpToTool(target: JumpTarget, label: string) {
           <UiIcon :name="detailsOpen ? 'chevron-down' : 'chevron-right'" :size="14" />
           <span class="tabular-nums">运行详情 · {{ turn.currentStep }} 步 · {{ turn.toolCalls.length }} 次工具调用</span>
         </UiButton>
-        <div v-if="detailsOpen" :id="detailsId" ref="tools" class="tools">
+        <div v-if="detailsOpen" :id="detailsId" class="tools">
           <ToolCallCollapsible
-            v-for="tool in turn.toolCalls" :key="tool.key" :class="{ 'tool-highlight': toolHighlight === tool.key }"
+            v-for="tool in turn.toolCalls" :key="tool.key"
             :tool="tool" :session-id="run.sessionId" :expanded="expanded.has(tool.key)"
             @toggle="toggle(tool.key)" @inspect="emit('openInspector', $event)"
           />
@@ -147,7 +130,6 @@ async function jumpToTool(target: JumpTarget, label: string) {
 .progress { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-elapsed { margin-inline-start: auto; }
 .tools { display: grid; gap: 5px; margin-top: 4px; }
-.tools :deep(.tool-highlight) { border-color: var(--accent-soft-border); background: var(--accent-soft-bg); }
 .connection-banner { padding: 5px 7px; background: var(--status-warn-bg); color: var(--status-warn-fg); border-radius: var(--radius-sm); }
 .terminal-actions { display: grid; gap: 5px; color: var(--status-stopped-fg); font-size: 12px; overflow-wrap: anywhere; }
 .terminal-actions.failed { color: var(--status-failed-fg); }

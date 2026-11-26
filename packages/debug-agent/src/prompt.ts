@@ -13,6 +13,7 @@ const guidance = [
   'Use only tool-observed file names, step numbers, line numbers and artifactId values. Cite the observation that supports each finding and never fabricate coordinates or credentials.',
   'Write the human-readable answer first. End with a fence opened by ```investigation-conclusion on its own line, containing only one JSON object and closed by three backticks.',
   'Include summary, an optional rootCauseStep (zero-based or null), an optional rootCauseCategory, threeStateAssessment, evidence and recommendations.',
+  'Optional errorSummaries describe observed error lines in the user’s language. Use a positive line number and the observed file or artifactId, for example {"file":"trace.jsonl","line":6,"summary":"Brief explanation"}.',
   'The threeStateAssessment object may include terminationReason, hasToolError and taskOutcome (passed, failed or unknown). Use arrays for evidence and recommendations, including empty arrays when appropriate.',
   'Use the following evidence shapes. Example values are illustrative. Replace them with tool observations or omit the entry.',
   '{"kind":"file_step","label":"Observed step","file":"trace.jsonl","step":0}',

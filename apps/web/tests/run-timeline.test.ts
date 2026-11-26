@@ -304,7 +304,7 @@ describe('F10_TIMELINE_AND_CONTROL_UI 挂载工作台', () => {
     expect(ui.wrapper.find(test('open-settings-from-error-btn')).exists()).toBe(false);
   });
 
-  it('W2-09 高信号展开并聚焦工具，三态独立，按证据类型打开纯文本右栏', async () => {
+  it('W2-09 精简会话页眉与工具详情，三态独立，按证据类型打开纯文本右栏', async () => {
     const hostile = '<script>alert(1)</script> <img src=x onerror=alert(1)> [x](javascript:alert(1))';
     const report = { ...conclusion, summary: hostile, recommendations: [hostile] };
     const summary: ToolOutputSummary = { byteSize: 130, lineCount: 16, truncatedForLlm: true,
@@ -326,24 +326,29 @@ describe('F10_TIMELINE_AND_CONTROL_UI 挂载工作台', () => {
     expect(ui.el('conclusion-card').text()).toContain(hostile);
     expect(ui.el('safe-markdown-view').text()).toContain(hostile);
     expect(ui.wrapper.find('img, iframe, a[href], script').exists()).toBe(false);
+    expect(ui.wrapper.get('.session-header h1').text()).not.toBe('');
+    expect(ui.wrapper.get('.session-header').find('code').exists()).toBe(false);
+    expect(ui.wrapper.find('.topbar-context').exists()).toBe(false);
+    for (const button of ['jump-first-error-btn', 'jump-retry-loop-btn', 'jump-slow-tool-btn']) {
+      expect(ui.wrapper.find(test(button)).exists()).toBe(false);
+    }
 
     const inspector = () => ui.el('inspector-target-preview');
     const chip = (kind: string) => ui.wrapper.get(test('evidence-chip') + '[data-evidence-kind="' + kind + '"]');
-    await ui.el('jump-first-error-btn').trigger('click');
-    await flushPromises();
+    await ui.el('run-details-toggle').trigger('click');
     const first = ui.wrapper.get(test('tool-call-card') + '[data-tool-id="tc_first"]');
+    await first.get(test('tool-toggle-btn')).trigger('click');
     expect(first.get(test('tool-toggle-btn')).attributes('aria-expanded')).toBe('true');
-    expect(document.activeElement).toBe(first.get(test('tool-toggle-btn')).element);
     expect(first.text()).toContain(hostile);
     expect(first.find('img').exists()).toBe(false);
+    await first.get(test('tool-inspect-btn')).trigger('click');
     expect(inspector().attributes('data-target-mode')).toBe('artifact');
     expect(inspector().text()).toMatch(/art_fixture.*L15/s);
 
-    await ui.el('jump-retry-loop-btn').trigger('click');
-    await flushPromises();
-    expect(document.activeElement?.closest(test('tool-call-card'))?.getAttribute('data-tool-id')).toBe('tc_second');
-    await ui.el('jump-slow-tool-btn').trigger('click');
-    await flushPromises();
+    const secondTool = ui.wrapper.get(test('tool-call-card') + '[data-tool-id="tc_second"]');
+    await secondTool.get(test('tool-toggle-btn')).trigger('click');
+    expect(secondTool.get(test('tool-toggle-btn')).attributes('aria-expanded')).toBe('true');
+    await secondTool.get(test('tool-inspect-btn')).trigger('click');
     expect(inspector().text()).toContain('second.log');
     await first.get(test('tool-inspect-btn')).trigger('click');
     expect(inspector().text()).toContain('art_fixture');

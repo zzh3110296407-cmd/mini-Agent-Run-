@@ -117,6 +117,20 @@ describe('M1.1 public shared schemas', () => {
     expect(schema.safeParse(invalid).success).toBe(false);
   });
 
+  it('preserves optional per-line error summaries and validates their coordinates', () => {
+    const errorSummaries: shared.ErrorLineSummary[] = [
+      { file: 'trace.log', line: 4, summary: 'Lookup timed out' },
+      { artifactId, line: 9, summary: 'Missing argument' },
+      { line: 12, summary: 'Connection refused' },
+    ];
+    expect(shared.InvestigationConclusionSchema.parse(conclusion)).toEqual(conclusion);
+    expect(shared.InvestigationConclusionSchema.parse({ ...conclusion, errorSummaries }))
+      .toEqual({ ...conclusion, errorSummaries });
+    for (const invalid of [{ line: 0 }, { line: 1.5 }, { summary: ' ' }, { file: ' ' }, { artifactId: runId }]) {
+      expect(shared.ErrorLineSummarySchema.safeParse({ ...errorSummaries[0], ...invalid }).success).toBe(false);
+    }
+  });
+
   it('trims shared path and name fields according to the v1.1 contract', () => {
     const padded = ' \t trace.json \t ';
     const paddedEntry = { ...entry, name: padded, path: padded };

@@ -83,6 +83,13 @@ export const EvidenceRefSchema = z.discriminatedUnion('kind', [
   { path: ['endLine'], message: 'endLine must be at or after startLine.' },
 );
 
+export const ErrorLineSummarySchema = z.object({
+  file: NonBlankStringSchema.optional(),
+  artifactId: ArtifactIdSchema.optional(),
+  line: positive,
+  summary: NonBlankStringSchema,
+});
+
 export const InvestigationConclusionSchema = z.object({
   summary: NonBlankStringSchema,
   rootCauseStep: nonnegative.nullable().optional(),
@@ -94,6 +101,7 @@ export const InvestigationConclusionSchema = z.object({
   }).optional(),
   evidence: z.array(EvidenceRefSchema),
   recommendations: z.array(NonBlankStringSchema),
+  errorSummaries: z.array(ErrorLineSummarySchema).optional(),
 });
 
 const toolEvent = z.object({ toolCallId: ToolCallIdSchema, toolName });
@@ -158,6 +166,7 @@ export type PendingToolCall = z.infer<typeof PendingToolCallSchema>;
 export type AgentError = z.infer<typeof AgentErrorSchema>;
 export type AgentState = z.infer<typeof AgentStateSchema>;
 export type EvidenceRef = z.infer<typeof EvidenceRefSchema>;
+export type ErrorLineSummary = z.infer<typeof ErrorLineSummarySchema>;
 export type InvestigationConclusion = z.infer<typeof InvestigationConclusionSchema>;
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 export type RunEventEnvelope = z.infer<typeof RunEventEnvelopeSchema>;

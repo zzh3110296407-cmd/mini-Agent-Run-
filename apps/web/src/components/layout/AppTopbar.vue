@@ -11,8 +11,6 @@ const props = defineProps<{
   showSidebarToggle: boolean;
   sidebarOpen: boolean;
   inspectorOpen: boolean;
-  sessionTitle?: string;
-  targetPath?: string;
 }>();
 const emit = defineEmits<{ retryHealth: []; toggleSidebar: []; toggleTheme: []; toggleInspector: [] }>();
 
@@ -32,10 +30,6 @@ const connection = computed(() => labels[props.health]);
         aria-controls="sidebar-pane" :aria-expanded="sidebarOpen" @click="emit('toggleSidebar')"
       ><UiIcon name="panel-left" /></UiButton>
       <div class="brand"><span class="brand-mark" aria-hidden="true">›_</span><span>Mini Agent Run <span class="brand-label">排查台</span></span></div>
-      <div v-if="sessionTitle" class="topbar-context">
-        <span class="context-title" :title="sessionTitle">{{ sessionTitle }}</span>
-        <span v-if="targetPath" class="context-path" :title="targetPath">{{ targetPath }}</span>
-      </div>
     </div>
     <div class="topbar-actions">
       <div role="status" data-testid="health-status-badge">
@@ -83,22 +77,10 @@ const connection = computed(() => labels[props.health]);
   background: var(--accent-soft-bg);
   font: 700 14px/1 var(--font-mono);
 }
-.topbar-context { display: flex; min-width: 0; gap: 8px; align-items: center; padding-inline-start: 10px; margin-inline-start: 3px; border-inline-start: 1px solid var(--border-strong); }
-.context-title, .context-path { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.context-title { max-width: 19ch; }
-.context-path {
-  color: var(--text-secondary);
-  font: 11.5px/17px var(--font-mono);
-  background: var(--bg-muted);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xs);
-  padding-inline: 5px;
-}
 .health { padding: 0; border: 0; border-radius: 999px; background: transparent; }
-@media (max-width: 700px) { .context-path { display: none; } }
 @media (max-width: 490px) {
   .topbar { padding-inline: 7px; gap: 5px; }
   .topbar-actions, .topbar-left { gap: 4px; }
-  .brand-label, .topbar-context { display: none; }
+  .brand-label { display: none; }
 }
 </style>

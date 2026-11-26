@@ -93,7 +93,6 @@ function jumpRun(id: RunId) {
     <header class="session-header">
       <div class="column">
         <h1>{{ session.title }}</h1>
-        <code :title="session.targetPath">{{ session.targetPath }}</code>
       </div>
     </header>
     <div ref="timeline" class="timeline-scroll" aria-label="排查时间线" data-testid="run-timeline-scroll" @scroll.passive="updateScrollLock">
@@ -109,7 +108,7 @@ function jumpRun(id: RunId) {
           :reconnecting="reconnectingRunId === turn.run.id" :reconnect-attempts="reconnectAttempts"
           :max-reconnect-attempts="maxReconnectAttempts" :reconnect-exhausted="reconnectExhausted"
           :highlighted="highlightedRun === turn.run.id"
-          @retry="retry" @edit-retry="editRetry" @jump-run="jumpRun" @hold-scroll="stickToBottom = false"
+          @retry="retry" @edit-retry="editRetry" @jump-run="jumpRun"
           @open-inspector="emit('openInspector', $event)"
         />
       </div>
@@ -143,8 +142,7 @@ function jumpRun(id: RunId) {
 .investigation { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .column { width: min(100%, 850px); margin-inline: auto; padding-inline: clamp(12px, 3vw, 28px); }
 .session-header { flex: none; padding-block: 12px; border-bottom: 1px solid var(--border-subtle); }
-.session-header h1 { margin: 0 0 3px; font-size: clamp(17px, 2.4vw, 21px); line-height: 1.3; overflow-wrap: anywhere; }
-.session-header code { display: block; overflow: hidden; color: var(--text-secondary); font: 12px/18px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.session-header h1 { margin: 0; font-size: clamp(17px, 2.4vw, 21px); line-height: 1.3; overflow-wrap: anywhere; }
 .timeline-scroll { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; }
 .timeline { display: grid; gap: 12px; padding-block: 14px; }
 .history-status { margin: 0; color: var(--text-secondary); font-size: 12px; }
