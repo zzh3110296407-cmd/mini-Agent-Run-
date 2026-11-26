@@ -1,16 +1,20 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue';
-import { clampInspectorWidth, maxInspectorWidth, minInspectorWidth } from '../../composables/useWorkbenchLayout';
+import {
+  clampInspectorWidth, maxInspectorWidthFor, minInspectorWidth, viewportModeFor,
+} from '../../composables/useWorkbenchLayout';
 import UiIcon from '../ui/UiIcon.vue';
 
-const props = defineProps<{ width: number }>();
+const props = withDefaults(defineProps<{ width: number; maxWidth?: number }>(), {
+  maxWidth: () => maxInspectorWidthFor(window.innerWidth, viewportModeFor(window.innerWidth)),
+});
 const emit = defineEmits<{ 'update:width': [width: number] }>();
 const dragging = ref(false);
 let originX = 0;
 let originWidth = 0;
 
 function resize(width: number) {
-  emit('update:width', clampInspectorWidth(width));
+  emit('update:width', clampInspectorWidth(width, props.maxWidth));
 }
 
 function move(event: MouseEvent) {
@@ -42,7 +46,7 @@ onBeforeUnmount(endDrag);
   <div
     class="divider" :class="{ dragging }" data-testid="inspector-divider" role="separator" aria-orientation="vertical"
     aria-label="调整检视器宽度" aria-controls="inspector-panel" :aria-valuenow="width"
-    :aria-valuemin="minInspectorWidth" :aria-valuemax="maxInspectorWidth" tabindex="0"
+    :aria-valuemin="minInspectorWidth" :aria-valuemax="maxWidth" tabindex="0"
     @mousedown="startDrag" @keydown.left.prevent="resize(width + 24)" @keydown.right.prevent="resize(width - 24)"
   >
     <UiIcon name="grip-vertical" :size="12" />
@@ -54,6 +58,7 @@ onBeforeUnmount(endDrag);
   position: relative;
   z-index: var(--z-resize-handle);
   width: 7px;
+  flex: none;
   display: grid;
   place-items: center;
   color: var(--text-muted);

@@ -8,7 +8,6 @@ import { formatPathError } from './usePathBrowser';
 import type { InspectorTargetRequest } from './useRunStream';
 
 export type LogLevelFilter = LogLevel | 'all';
-export type LogViewMode = 'raw' | 'json';
 export type LineRange = { startLine: number; endLine: number };
 type Source =
   | { mode: 'file'; sessionId: SessionId; file?: string }
@@ -72,7 +71,6 @@ export function useLogInspector({
   const error = ref('');
   const levelFilter = ref<LogLevelFilter>('all');
   const searchQuery = ref('');
-  const viewMode = ref<LogViewMode>('raw');
   const evidenceTarget = shallowRef<InspectorTargetRequest | null>(null);
   const focusRange = shallowRef<LineRange | null>(null);
   const selectedLine = ref<number | null>(null);
@@ -357,7 +355,6 @@ export function useLogInspector({
   function resetFilters() {
     searchQuery.value = '';
     levelFilter.value = 'all';
-    viewMode.value = 'raw';
   }
 
   watch([open, () => session.value?.id, () => session.value?.targetPath], ([, id, path], old) => {
@@ -418,7 +415,6 @@ export function useLogInspector({
 
   async function jumpToLine(line: number) {
     const visible = loadedLines.value.some(({ lineNumber }) => lineNumber === line);
-    viewMode.value = 'raw';
     if (visible && !searchQuery.value) { selectLine(line); return; }
     searchQuery.value = '';
     levelFilter.value = 'all';
@@ -471,7 +467,6 @@ export function useLogInspector({
   async function navigateMatch(delta: -1 | 1) {
     const count = loadedLines.value.length;
     if (!searchQuery.value || !count || loading.value || loadingMore.value) return;
-    viewMode.value = 'raw';
     const index = matchInWindow.value < 0 ? (delta === 1 ? 0 : count - 1) : matchInWindow.value + delta;
     if (index < 0 && previousPages.value.length) { await goPrevious(true); return; }
     if (index >= count && nextBodyOffset.value !== null) { await nextPage(); return; }
@@ -482,7 +477,7 @@ export function useLogInspector({
 
   return {
     sourceMode, fileOptions, filePickerOpen, fileListLoading, fileListError, selectedFilePath, activeArtifactId, activeArtifactMeta,
-    slice, loadedLines, loading, loadingMore, error, levelFilter, searchQuery, activeMatchIndex, viewMode,
+    slice, loadedLines, loading, loadingMore, error, levelFilter, searchQuery, activeMatchIndex,
     evidenceTarget, focusRange, selectedLine, stepNotice, scrollRequest, errorRows, errorTotalCount,
     errorNextOffsetLine, errorHasMore, errorLoading, errorFetchError, nextBodyOffset, canGoPrevious,
     openTarget, returnToOriginalFile, chooseFile, jumpToLine, changeQuery, changeLevel, nextPage, previousPage, loadMore, navigateMatch,

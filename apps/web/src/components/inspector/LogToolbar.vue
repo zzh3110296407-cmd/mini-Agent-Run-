@@ -9,7 +9,7 @@ const props = defineProps<{ inspector: ReturnType<typeof useLogInspector> }>();
 const {
   sourceMode, fileOptions, filePickerOpen, fileListLoading, fileListError, selectedFilePath,
   activeArtifactId, activeArtifactMeta, slice, loading, loadingMore, focusRange, levelFilter, evidenceTarget,
-  searchQuery, activeMatchIndex, viewMode, changeQuery, changeLevel, chooseFile,
+  searchQuery, activeMatchIndex, changeQuery, changeLevel, chooseFile,
   navigateMatch, jumpToLine, returnToOriginalFile, retryFiles,
 } = props.inspector;
 
@@ -129,11 +129,6 @@ function jumpEvidence() {
           :aria-pressed="levelFilter === level" :data-log-level="level" @click="changeLevel(level)"
         >{{ level.toUpperCase() }}</UiButton>
       </div>
-      <UiButton
-        variant="subtle" size="sm" data-testid="log-view-mode-toggle"
-        :aria-label="viewMode === 'raw' ? '切换至 JSON 视图' : '切换至原文视图'"
-        @click="viewMode = viewMode === 'raw' ? 'json' : 'raw'"
-      >{{ viewMode === 'raw' ? 'JSON' : '原文' }}</UiButton>
       <UiButton variant="ghost" size="sm" data-testid="log-copy-btn" :disabled="!slice?.lines.length" @click="copy">
         <UiIcon name="copy" :size="13" />复制
       </UiButton>

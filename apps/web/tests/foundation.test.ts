@@ -27,7 +27,7 @@ describe('M3.1 前端工作台底座', () => {
       },
     }));
     try {
-      expect(wrapper.text()).toBe('desktop light 720');
+      expect(wrapper.text()).toBe('desktop light 776');
       await wrapper.trigger('click');
       expect(document.documentElement.dataset.theme).toBe('dark');
       expect(localStorage.getItem('mini-agent-run.inspector-width')).toBe('340');

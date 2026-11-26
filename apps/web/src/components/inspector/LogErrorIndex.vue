@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import type { LogLine } from '@mini-agent-run/shared';
+import { computed } from 'vue';
+import { resolveErrorLineSummary } from '../../utils/errorSummary';
 import UiButton from '../ui/UiButton.vue';
 
-defineProps<{
+const props = defineProps<{
   rows: readonly LogLine[];
+  context: Parameters<typeof resolveErrorLineSummary>[1];
   total: number;
   loading: boolean;
   hasMore: boolean;
@@ -11,6 +14,9 @@ defineProps<{
   selectedLine: number | null;
 }>();
 const emit = defineEmits<{ jump: [line: number]; more: []; retry: [] }>();
+const summaries = computed(() => props.rows.map((row) => ({
+  line: row.lineNumber, ...resolveErrorLineSummary(row, props.context),
+})));
 </script>
 
 <template>
@@ -18,12 +24,15 @@ const emit = defineEmits<{ jump: [line: number]; more: []; retry: [] }>();
     <h3>错误行 <span class="tabular-nums" data-testid="log-error-count">{{ total }}</span></h3>
     <div class="error-list">
       <button
-        v-for="row in rows" :key="row.lineNumber" type="button" data-testid="log-error-jump"
-        :aria-current="selectedLine === row.lineNumber ? 'location' : undefined" :data-error-line="row.lineNumber"
-        :title="row.text" @click="emit('jump', row.lineNumber)"
+        v-for="summary in summaries" :key="summary.line" type="button" data-testid="log-error-jump"
+        :aria-current="selectedLine === summary.line ? 'location' : undefined" :data-error-line="summary.line"
+        :title="summary.text" @click="emit('jump', summary.line)"
       >
-        <code class="tabular-nums">L{{ row.lineNumber }}</code>
-        <span class="error-preview" data-testid="log-error-preview">{{ row.text }}</span>
+        <span class="error-location">
+          <code class="tabular-nums">L{{ summary.line }}</code>
+          <span class="summary-source" :data-summary-source="summary.source">{{ summary.source === 'ai' ? 'AI 摘要' : '错误提取' }}</span>
+        </span>
+        <span class="error-preview" data-testid="log-error-preview" :title="summary.text">{{ summary.text }}</span>
       </button>
       <p v-if="loading" role="status">正在读取错误行…</p>
       <template v-else-if="error">
@@ -46,6 +55,9 @@ h3 span { color: var(--status-failed-fg); }
 .error-list > button[data-error-line] { display: grid; width: 100%; padding: 5px 6px; gap: 1px; border: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; color: var(--text-secondary); text-align: start; cursor: pointer; }
 .error-list > button[data-error-line]:hover, .error-list > button[aria-current="location"] { background: var(--accent-soft-bg); }
 .error-list code { color: var(--status-failed-fg); }
+.error-location { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 3px; }
+.summary-source { padding-inline: 4px; border-radius: var(--radius-xs); background: var(--bg-muted); font-size: 10px; }
+.summary-source[data-summary-source="ai"] { background: var(--accent-soft-bg); color: var(--accent-soft-fg); }
 .error-preview { overflow: hidden; font: 11px/16px var(--font-mono); text-overflow: ellipsis; white-space: pre; }
 p { margin: 5px; color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
 </style>

@@ -3,6 +3,8 @@ const paths = {
   plus: ['M12 5v14m-7-7h14'],
   'panel-right': ['M3 5h18v14H3zM15 5v14'],
   'panel-left': ['M3 5h18v14H3zM9 5v14'],
+  'maximize-2': ['M15 3h6v6M21 3l-7 7M9 21H3v-6M3 21l7-7'],
+  'minimize-2': ['M21 3l-7 7M14 4v6h6M3 21l7-7M4 14h6v6'],
   x: ['m6 6 12 12M18 6 6 18'],
   'grip-vertical': ['M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01'],
   folder: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z'],

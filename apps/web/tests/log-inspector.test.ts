@@ -111,7 +111,8 @@ async function inspectorFor(initial: Session) {
   const wrapper = mount(defineComponent({
     setup() {
       inspector = useLogInspector({ session: sessionRef, open });
-      return () => sessionRef.value && open.value ? h(LargeLogInspector, { session: sessionRef.value, inspector }) : null;
+      return () => sessionRef.value && open.value
+        ? h(LargeLogInspector, { session: sessionRef.value, inspector, conclusions: [] }) : null;
     },
   }), { attachTo: document.body });
   wrappers.push(wrapper);
@@ -299,11 +300,11 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     await flushPromises();
     await ui.wrapper.get('[data-log-level="info"]').trigger('click');
     await flushPromises();
-    await click(ui.wrapper, 'log-view-mode-toggle');
-    expect(ui.wrapper.find(test('log-json-view')).exists()).toBe(true);
+    expect(ui.wrapper.get('[data-log-level="info"]').attributes('aria-pressed')).toBe('true');
+    expect(ui.wrapper.find(test('log-line') + lineAttr(800)).exists()).toBe(false);
     await ui.errorAt(800).trigger('click');
     await flushPromises();
-    expect(ui.wrapper.find(test('log-json-view')).exists()).toBe(false);
+    expect(ui.wrapper.find(test('log-view-mode-toggle')).exists()).toBe(false);
     expect(ui.wrapper.get('[data-log-level="all"]').attributes('aria-pressed')).toBe('true');
     expect(ui.line(800).attributes('data-highlighted')).toBe('true');
     await click(ui.wrapper, 'log-jump-evidence-btn');
@@ -457,39 +458,88 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     expect(geometry).toBe(2480 * 24);
   });
 
-  it('W3-09 原文、高亮、JSON 与错误预览均保留恶意负载的文本语义', async () => {
+  it('U2-06/W3-09 美化 JSONL 保留行号、原文复制、搜索高亮与错误摘要的恶意文本', async () => {
     const html = '<script>window.__xss=1</script><img src=x onerror=alert(1)><iframe></iframe>';
-    const jsonText = JSON.stringify({ payload: html });
+    const entry = { type: 'tool_call', toolName: 'read_file_slice', error: { message: html } };
+    const jsonText = JSON.stringify(entry);
     const hostile = 'ERROR  ' + html + '  ';
-    mockLogs({ files: { [single.targetPath]: rows([hostile, jsonText]) } });
+    const log = rows([hostile, jsonText, '{', '  "message": "multiple lines"', '}']);
+    log[1]!.level = 'error';
+    mockLogs({ files: { [single.targetPath]: log } });
+    const clipboard = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
     const ui = await inspectorFor(single);
     expect(ui.line(1).get(test('log-line-text')).element.textContent).toBe(hostile);
-    expect(ui.line(2).get(test('log-line-text')).element.textContent).toBe(jsonText);
-    expect(ui.errorAt(1).get(test('log-error-preview')).element.textContent).toBe(hostile);
+    expect(ui.line(1).get(test('log-line-text')).element.tagName).toBe('CODE');
+    expect(ui.line(2).get('pre' + test('log-line-text')).element.textContent).toBe(JSON.stringify(entry, null, 2));
+    expect(ui.line(2).get('.line-number').text()).toBe('2');
+    expect(ui.line(2).attributes('data-level')).toBe('error');
+    expect(ui.line(4).get('code' + test('log-line-text')).element.textContent).toBe(log[3]!.text);
+    expect(ui.errorAt(1).get(test('log-error-preview')).element.textContent).toBe(html);
+    const extracted = ui.errorAt(2);
+    expect(extracted.get('[data-summary-source="extracted"]').text()).toBe('错误提取');
+    expect(extracted.get(test('log-error-preview')).element.textContent).toBe('read_file_slice · ' + html);
+    expect(extracted.get(test('log-error-preview')).attributes('title')).toBe('read_file_slice · ' + html);
+    expect(ui.wrapper.find(test('log-view-mode-toggle')).exists()).toBe(false);
+    expect(ui.wrapper.find(test('log-json-view')).exists()).toBe(false);
+    await click(ui.wrapper, 'log-copy-btn');
+    expect(clipboard).toHaveBeenCalledWith(log.map(({ text }) => text).join('\n'));
     expect(ui.wrapper.findAll('script,img,iframe')).toHaveLength(0);
     await ui.wrapper.get<HTMLInputElement>(test('log-search-input')).setValue('<SCRIPT>');
     await ui.wrapper.get('form').trigger('submit');
     await flushPromises();
     expect(ui.line(1).get('mark').element.textContent).toBe('<script>');
     expect(ui.line(1).get(test('log-line-text')).element.textContent).toBe(hostile);
+    expect(ui.line(2).get('pre mark').element.textContent).toBe('<script>');
+    expect(ui.line(2).get('pre').element.textContent).toBe(JSON.stringify(entry, null, 2));
     expect(ui.wrapper.findAll('script,img,iframe')).toHaveLength(0);
-    await click(ui.wrapper, 'log-view-mode-toggle');
-    expect(ui.el('log-json-view').element.textContent).toBe(hostile + '\n// 原始行 2\n' + JSON.stringify({ payload: html }, null, 2));
+    await extracted.trigger('click');
+    await flushPromises();
+    expect(ui.line(2).attributes('data-selected')).toBe('true');
+    expect(ui.line(2).attributes('data-highlighted')).toBe('true');
     expect(ui.wrapper.findAll('script,img,iframe')).toHaveLength(0);
+  });
+
+  it('U2-06/U2-07 混合日志分窗渲染，展开 JSON 后仍按原始行定位', async () => {
+    const log = rows(Array.from({ length: 420 }, (_, index) => index % 2
+      ? 'INFO line ' + (index + 1) : JSON.stringify({ message: 'line ' + (index + 1) })));
+    log[298]!.level = 'error';
+    mockLogs({ files: { [single.targetPath]: log } });
+    const ui = await inspectorFor(single);
+    await click(ui.wrapper, 'log-load-more');
+    await click(ui.wrapper, 'log-load-more');
+    const viewport = ui.wrapper.get<HTMLElement>(test('log-scroll-container'));
+    expect(viewport.find('[data-content-height="20160"]').exists()).toBe(true);
+    expect(ui.wrapper.findAll(test('log-line')).length).toBeLessThan(90);
+    expect(ui.line(1).get('pre').text()).toContain('"message": "line 1"');
+    await ui.errorAt(299).trigger('click');
+    await flushPromises();
+    expect(viewport.element.scrollTop).toBe(298 * 48 - (480 - 72) / 2);
+    expect(ui.line(299).get('pre').text()).toContain('"message": "line 299"');
+    expect(ui.line(299).attributes('data-selected')).toBe('true');
+    expect(ui.wrapper.find(test('log-line') + lineAttr(1)).exists()).toBe(false);
+    expect(ui.wrapper.findAll(test('log-line')).length).toBeLessThan(90);
   });
 
   it('W3-10 App 串联三类证据与工具入口，窄屏 Escape 优先关闭文件弹层', async () => {
     vi.stubGlobal('innerWidth', 1536);
+    const hostile = '<script>alert(1)</script><img src=x onerror=alert(1)><iframe></iframe>';
     const record = { ...closedRun, lastSeq: 2, conclusion: {
-      ...conclusion, evidence: [
+      ...conclusion,
+      errorSummaries: [
+        { file: 'actual.JSONL', line: 115, summary: '模型摘要 ' + hostile },
+        { artifactId: artifact.id, line: 219, summary: '产物摘要' },
+      ],
+      evidence: [
         { kind: 'file_line' as const, file: original, startLine: 115, endLine: 117, label: '原始证据' },
         { kind: 'file_step' as const, file: original, step: 7, label: '步骤证据' },
         { kind: 'artifact_line' as const, artifactId: artifact.id, startLine: 219, label: '产物证据' },
       ],
     } };
     const api = mockLogs({
-      files: { [original]: large(320, { 15: 'INFO step 70', 66: 'INFO step 7 complete' }) },
-      artifactLines: large(240),
+      files: { [original]: large(320, {
+        15: 'INFO step 70', 66: 'INFO step 7 complete', 115: 'ERROR raw detail', 116: 'ERROR covered by evidence',
+      }) },
+      artifactLines: large(240, { 219: 'ERROR artifact raw detail' }),
       other(url) {
         if (same(url, '/api/health')) return Response.json(health);
         if (same(url, '/api/sessions')) return Response.json({ sessions: [
@@ -510,6 +560,7 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     await flushPromises();
     const chip = (kind: string) => wrapper.get(test('evidence-chip') + '[data-evidence-kind="' + kind + '"]');
     const line = (number: number) => wrapper.get(test('log-line') + lineAttr(number));
+    const errorAt = (number: number) => wrapper.get(test('log-error-jump') + jumpAttr(number));
     expect(wrapper.find('#inspector-panel').exists()).toBe(false);
     await chip('file_line').trigger('click');
     await flushPromises();
@@ -518,6 +569,11 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     expect([115, 116, 117].map((n) => line(n).attributes('data-highlighted'))).toEqual(['true', 'true', 'true']);
     expect(line(118).attributes('data-highlighted')).toBe('false');
     expect(wrapper.get(test('inspector-target-preview')).text()).toContain('L115–L117');
+    expect(errorAt(115).get('[data-summary-source="ai"]').text()).toBe('AI 摘要');
+    expect(errorAt(115).get(test('log-error-preview')).element.textContent).toBe('模型摘要 ' + hostile);
+    expect(errorAt(115).attributes('title')).toBe('模型摘要 ' + hostile);
+    expect(errorAt(116).get(test('log-error-preview')).text()).toBe('原始证据');
+    expect(wrapper.findAll('script,img,iframe')).toHaveLength(0);
 
     await chip('file_step').trigger('click');
     await flushPromises();
@@ -530,6 +586,7 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     await flushPromises();
     expect(api.see('/api/artifacts/' + artifact.id, { offsetLine: '179', level: null })).toBe(true);
     expect(line(219).attributes('data-selected')).toBe('true');
+    expect(errorAt(219).get(test('log-error-preview')).text()).toBe('产物摘要');
     await click(wrapper, 'return-to-original-file');
     expect(wrapper.get(test('log-source-type')).text()).toBe('原文件');
     expect(api.calls.at(-2)?.searchParams.get('file')).toBe(original);
@@ -544,12 +601,19 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     window.dispatchEvent(new Event('resize'));
     await flushPromises();
     expect(wrapper.get('#inspector-panel').attributes('role')).toBe('dialog');
+    await click(wrapper, 'inspector-fullscreen-btn');
     await click(wrapper, 'log-file-choose');
     await wrapper.get(test('log-file-option')).trigger('keydown', { key: 'Escape' });
     await flushPromises();
     expect(wrapper.findAll(test('log-file-option'))).toHaveLength(0);
     expect(document.activeElement).toBe(wrapper.get(test('log-file-choose')).element);
+    expect(wrapper.get(test('inspector-fullscreen-btn')).attributes('aria-pressed')).toBe('true');
     expect(wrapper.find('#inspector-panel').exists()).toBe(true);
+    await wrapper.get(test('log-file-choose')).trigger('keydown', { key: 'Escape' });
+    await flushPromises();
+    expect(wrapper.get(test('inspector-fullscreen-btn')).attributes('aria-pressed')).toBe('false');
+    expect(wrapper.find(test('log-inspector-drawer')).exists()).toBe(true);
+    expect(wrapper.get(test('log-source-type')).text()).toBe('原文件');
     await wrapper.get(test('log-file-choose')).trigger('keydown', { key: 'Escape' });
     await flushPromises();
     expect(wrapper.find('#inspector-panel').exists()).toBe(false);

@@ -9,6 +9,8 @@ import PathPickerModal from './components/sidebar/PathPickerModal.vue';
 import SessionSidebar from './components/sidebar/SessionSidebar.vue';
 import SettingsModal from './components/sidebar/SettingsModal.vue';
 import InvestigationWorkspace from './components/timeline/InvestigationWorkspace.vue';
+import UiButton from './components/ui/UiButton.vue';
+import UiDialog from './components/ui/UiDialog.vue';
 import UiEmpty from './components/ui/UiEmpty.vue';
 import UiIcon from './components/ui/UiIcon.vue';
 import UiSheet from './components/ui/UiSheet.vue';
@@ -30,7 +32,10 @@ const deleting = ref(false);
 const deletionError = ref('');
 const { hasCustomApiKey } = useApiKeySettings();
 const { health, checkHealth } = useHealthProbe();
-const { viewport, theme, inspectorOpen, sidebarDrawerOpen, inspectorWidth, toggleTheme, setInspectorWidth } = useWorkbenchLayout();
+const {
+  viewport, theme, inspectorOpen, sidebarDrawerOpen, inspectorWidth, maxInspectorWidth, inspectorFullscreen,
+  toggleTheme, setInspectorWidth, toggleInspectorFullscreen, exitInspectorFullscreen,
+} = useWorkbenchLayout();
 const {
   sessions, filteredSessions, filterQuery, activeSessionId, activeSessionDetail, loading, detailLoading, errorMessage,
   createSession, renameSession, deleteSession, selectSession, loadSessions, refreshSessions, syncSessionRunState,
@@ -60,6 +65,10 @@ const summary = computed(() => {
 });
 const inspectorSession = computed(() => summary.value?.session ?? null);
 const logInspector = useLogInspector({ session: inspectorSession, open: inspectorOpen });
+const inspectorConclusions = computed(() => stream.turns.value.flatMap(({ run, conclusion }) =>
+  run.sessionId === inspectorSession.value?.id && conclusion ? [conclusion] : []));
+const fullscreenLabel = computed(() => inspectorFullscreen.value ? '退出全屏' : '全屏');
+const fullscreenIcon = computed(() => inspectorFullscreen.value ? 'minimize-2' : 'maximize-2');
 
 function openPicker() {
   creationError.value = null;
@@ -138,11 +147,14 @@ function openInspector(target: InspectorTargetRequest) {
   if (viewport.value !== 'desktop') sidebarDrawerOpen.value = false;
 }
 
-function closeFilePickerOnEscape(event: KeyboardEvent) {
-  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || !logInspector.filePickerOpen.value) return;
+function handleInspectorEscape(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+  if (logInspector.filePickerOpen.value) logInspector.filePickerOpen.value = false;
+  else if (inspectorFullscreen.value && !deletionTarget.value && !pathOpen.value && !settingsOpen.value
+    && !(event.target instanceof Element && event.target.matches('[data-testid="session-rename-input"]'))) exitInspectorFullscreen();
+  else return;
   event.preventDefault();
   event.stopPropagation();
-  logInspector.filePickerOpen.value = false;
 }
 
 async function handleKeyboard(event: KeyboardEvent) {
@@ -170,11 +182,11 @@ async function handleKeyboard(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  window.addEventListener('keydown', closeFilePickerOnEscape, true);
+  window.addEventListener('keydown', handleInspectorEscape, true);
   window.addEventListener('keydown', handleKeyboard);
 });
 onUnmounted(() => {
-  window.removeEventListener('keydown', closeFilePickerOnEscape, true);
+  window.removeEventListener('keydown', handleInspectorEscape, true);
   window.removeEventListener('keydown', handleKeyboard);
 });
 </script>
@@ -183,14 +195,17 @@ onUnmounted(() => {
   <div class="workbench" :data-layout="viewport">
     <AppTopbar
       :theme="theme" :health="health" :show-sidebar-toggle="viewport === 'mobile'" :sidebar-open="sidebarDrawerOpen"
-      :inspector-open="inspectorOpen"
+      :inspector-open="inspectorOpen" :inert="viewport === 'desktop' && inspectorFullscreen"
       @retry-health="checkHealth" @toggle-theme="toggleTheme" @toggle-sidebar="toggleSidebarDrawer" @toggle-inspector="toggleInspector"
     />
     <div class="workbench-body">
-      <aside v-if="viewport !== 'mobile'" id="sidebar-pane" class="workbench-sidebar" aria-label="排查会话">
+      <aside
+        v-if="viewport !== 'mobile'" id="sidebar-pane" class="workbench-sidebar" aria-label="排查会话"
+        :inert="viewport === 'desktop' && inspectorFullscreen"
+      >
         <SessionSidebar v-bind="sidebarProps" v-on="sidebarEvents" />
       </aside>
-      <main class="workspace">
+      <main class="workspace" :inert="viewport === 'desktop' && inspectorFullscreen">
         <InvestigationWorkspace
           v-if="summary" :key="summary.session.id" :session="summary.session" :stream="stream"
           :ready="activeSessionDetail?.session.id === summary.session.id" :detail-loading="detailLoading"
@@ -205,10 +220,25 @@ onUnmounted(() => {
         </div>
       </main>
       <template v-if="viewport === 'desktop' && inspectorOpen">
-        <ResizableDivider :width="inspectorWidth" @update:width="setInspectorWidth" />
-        <aside id="inspector-panel" class="inspector" :style="{ width: inspectorWidth + 'px' }" aria-label="日志检视器">
-          <h2>日志检视器</h2>
-          <LargeLogInspector v-if="inspectorSession" :key="inspectorSession.id" :session="inspectorSession" :inspector="logInspector" />
+        <ResizableDivider
+          v-if="!inspectorFullscreen" class="desktop-divider" :width="inspectorWidth" :max-width="maxInspectorWidth"
+          @update:width="setInspectorWidth"
+        />
+        <aside
+          id="inspector-panel" class="inspector" :class="{ 'inspector-fullscreen': inspectorFullscreen }"
+          :style="inspectorFullscreen ? undefined : { width: inspectorWidth + 'px' }" aria-label="日志检视器"
+        >
+          <header class="inspector-header">
+            <h2>日志检视器</h2>
+            <UiButton variant="ghost" size="sm" data-testid="inspector-fullscreen-btn" :aria-pressed="inspectorFullscreen" @click="toggleInspectorFullscreen">
+              <UiIcon :name="fullscreenIcon" :size="14" />{{ fullscreenLabel }}
+            </UiButton>
+            <UiButton variant="ghost" size="sm" aria-label="关闭" @click="inspectorOpen = false"><UiIcon name="x" /></UiButton>
+          </header>
+          <LargeLogInspector
+            v-if="inspectorSession" :key="inspectorSession.id" :session="inspectorSession"
+            :inspector="logInspector" :conclusions="inspectorConclusions"
+          />
           <UiEmpty v-else class="inspector-empty" title="选择会话后可查看绑定目标" />
         </aside>
       </template>
@@ -219,15 +249,30 @@ onUnmounted(() => {
     >
       <SessionSidebar :show-heading="false" v-bind="sidebarProps" v-on="sidebarEvents" />
     </UiSheet>
-    <UiSheet
+    <UiDialog
       v-if="viewport !== 'desktop'" id="inspector-panel" :open="inspectorOpen" side="right" title="日志检视器"
+      class="inspector-sheet" :class="{ 'inspector-fullscreen': inspectorFullscreen }"
+      :style="{ '--inspector-sheet-width': viewport === 'mobile' ? '100vw' : inspectorWidth + 'px' }"
       @close="inspectorOpen = false"
     >
+      <template #title="{ titleId }">
+        <h2 :id="titleId" class="inspector-sheet-title">日志检视器</h2>
+        <UiButton variant="ghost" size="sm" data-testid="inspector-fullscreen-btn" :aria-pressed="inspectorFullscreen" @click="toggleInspectorFullscreen">
+          <UiIcon :name="fullscreenIcon" :size="14" />{{ fullscreenLabel }}
+        </UiButton>
+      </template>
       <div class="inspector-sheet-body">
-        <LargeLogInspector v-if="inspectorSession" :key="inspectorSession.id" :session="inspectorSession" :inspector="logInspector" />
+        <ResizableDivider
+          v-if="viewport === 'tablet' && !inspectorFullscreen" :width="inspectorWidth" :max-width="maxInspectorWidth"
+          @update:width="setInspectorWidth"
+        />
+        <LargeLogInspector
+          v-if="inspectorSession" :key="inspectorSession.id" :session="inspectorSession"
+          :inspector="logInspector" :conclusions="inspectorConclusions"
+        />
         <UiEmpty v-else class="inspector-empty" title="选择会话后可查看绑定目标" />
       </div>
-    </UiSheet>
+    </UiDialog>
     <PathPickerModal
       :open="pathOpen" :creating="creating" :creation-error="creationError"
       @close="closePicker" @confirm="confirmCreate" @clear-error="creationError = null"
@@ -243,10 +288,16 @@ onUnmounted(() => {
 .workbench-sidebar, .inspector { flex: none; min-height: 0; background: var(--bg-panel); }
 .workbench-sidebar { width: var(--sidebar-width); border-inline-end: 1px solid var(--border-subtle); }
 .workspace { display: flex; flex: 1; flex-direction: column; min-width: 0; overflow: hidden; }
+.workbench[data-layout="desktop"] .workspace { min-width: 240px; }
 .workspace-inner { width: min(100%, 760px); margin-inline: auto; padding: 27px clamp(16px, 4vw, 32px); overflow: auto; }
 .workspace h1 { margin: 0 0 15px; font-size: 23px; line-height: 1.28; letter-spacing: -.025em; overflow-wrap: anywhere; }
-.inspector > h2 { flex: none; margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
-.inspector { display: flex; max-width: calc(100% - var(--sidebar-width) - 285px); flex-direction: column; overflow: hidden; }
+.desktop-divider { margin-inline-start: -7px; }
+.inspector { display: flex; flex-direction: column; overflow: hidden; }
+.inspector-header { display: flex; flex: none; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
+.inspector-header h2 { margin: 0 auto 0 0; font-size: 13px; }
+.inspector-sheet-title { flex: 1; }
+:global(.ui-overlay.right > .ui-dialog.inspector-sheet) { width: var(--inspector-sheet-width); }
+:global(#inspector-panel.inspector-fullscreen) { position: fixed; inset: 0; width: 100%; max-width: none; z-index: var(--z-drawer); animation: none; }
 .inspector-sheet-body { display: flex; min-height: 0; height: 100%; }
 .inspector-empty { margin: 12px; }
 @media (max-width: 600px) {
