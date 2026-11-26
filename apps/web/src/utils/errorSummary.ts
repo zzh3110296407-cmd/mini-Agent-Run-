@@ -52,7 +52,7 @@ function matchesFile(path: string | null, file: string): boolean {
   };
   const actual = normalize(path);
   const observed = normalize(file);
-  return actual === observed || actual.split('/').at(-1) === observed.split('/').at(-1);
+  return actual === observed || (!observed.includes('/') && actual.endsWith('/' + observed));
 }
 
 export function resolveErrorLineSummary(

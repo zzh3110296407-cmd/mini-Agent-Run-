@@ -117,6 +117,48 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · W3-01', () => {
       .toEqual({ text: 'fallback', source: 'extracted' });
   });
 
+  it.each([
+    {
+      platform: 'POSIX', filePath: '/review/ses_a/Second.JSONL', file: '/review/ses_a/Second.JSONL',
+      other: '/review/ses_a/subdir/Second.JSONL', name: 'Second.JSONL',
+    },
+    {
+      platform: 'Windows', filePath: 'C:\\Review\\Ses_A\\Second.JSONL', file: 'c:/review/ses_a/second.jsonl',
+      other: 'c:/review/ses_a/subdir/second.jsonl', name: './second.jsonl',
+    },
+  ])('U2-08 $platform 的同名文件分别匹配逐行摘要与证据', ({ filePath, file, other, name }) => {
+    const conclusion: InvestigationConclusion = {
+      summary: 'Findings', recommendations: [],
+      errorSummaries: [
+        { file: other, line: 6, summary: '子目录模型摘要' },
+        { file, line: 6, summary: '当前文件模型摘要' },
+        { file: name, line: 5, summary: '仅给出文件名' },
+        { file: other, line: 8, summary: '仅有子目录模型摘要' },
+        { file: './subdir/Second.JSONL', line: 10, summary: '带目录的相对路径' },
+      ],
+      evidence: [
+        { kind: 'file_line', file: other, startLine: 7, endLine: 9, label: '子目录证据' },
+        { kind: 'file_line', file, startLine: 7, label: '当前文件证据' },
+      ],
+    };
+    const context = { filePath, sourceMode: 'file' as const, artifactId: null, conclusions: [conclusion] };
+    const resolve = (lineNumber: number, sourcePath = filePath) => resolveErrorLineSummary(
+      { lineNumber, level: 'error', text: '{"tool":"other","error":"range fallback"}' },
+      { ...context, filePath: sourcePath },
+    );
+    expect([5, 6, 7, 8, 9, 10].map((line) => resolve(line))).toEqual([
+      { text: '仅给出文件名', source: 'ai' },
+      { text: '当前文件模型摘要', source: 'ai' },
+      { text: '当前文件证据', source: 'ai' },
+      { text: 'other · range fallback', source: 'extracted' },
+      { text: 'other · range fallback', source: 'extracted' },
+      { text: 'other · range fallback', source: 'extracted' },
+    ]);
+    expect(resolve(6, other)).toEqual({ text: '子目录模型摘要', source: 'ai' });
+    expect(resolve(7, other)).toEqual({ text: '子目录证据', source: 'ai' });
+    expect(resolve(10, 'subdir/Second.JSONL')).toEqual({ text: '带目录的相对路径', source: 'ai' });
+  });
+
   it('U2-08 任意恶意或畸形行都能提取非空摘要', () => {
     const logText = fc.oneof(fc.string(), fc.array(fc.constantFrom('{', '[', '"', html, ...chunks)).map((parts) => parts.join('')));
     fc.assert(fc.property(logText, (raw) => {
