@@ -351,6 +351,37 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     expect(raw.split('\n').filter((line, index) => classify(line, index + 1) === 'error')).toEqual([]);
   });
 
+  it('keeps command failures with a nonzero exit footer distinct from successful output excerpts', async () => {
+    const diagnostics = [
+      'Starting test runner\nERROR: target not found',
+      'src/example.ts:17:65 - error TS7016: Could not find a declaration file',
+    ];
+    const cases = diagnostics.flatMap((diagnostic, index) => [2, 0].map((exitCode) => ({
+      file: 'command-' + index + '-' + exitCode + '.json',
+      failed: exitCode !== 0,
+      raw: JSON.stringify({ messages: [
+        { role: 'assistant', tool_calls: [{ id: 'command', name: 'run_command', arguments: {} }] },
+        { role: 'tool', tool_call_id: 'command', name: 'run_command',
+          content: diagnostic + '\n[Command finished with exit code ' + exitCode + ']' },
+      ] }, null, 2),
+    })));
+    const { call } = build(Object.fromEntries(cases.map(({ file, raw }) => [file, raw])));
+    for (const { file, raw, failed } of cases) {
+      const result = await call('inspect_trace', { file });
+      expect(result.isError).toBe(false);
+      const lines = raw.split('\n');
+      const line = lines.findIndex((value) => value.includes('"content":')) + 1;
+      expect(result.data, file).toMatchObject({
+        threeState: { hasToolError: failed, toolErrorCount: Number(failed) },
+        toolCalls: [{ step: 0, toolName: 'run_command', isError: failed }],
+        anomalies: { firstError: failed ? { step: 1, line } : null },
+      });
+      const classify = createTraceLineClassifier(raw);
+      expect(lines.flatMap((value, index) => classify(value, index + 1) === 'error' ? [index + 1] : []))
+        .toEqual(failed ? [line] : []);
+    }
+  });
+
   it('uses explicit tool success and retains structured and legacy text failures', async () => {
     const fixtures = [
       ['success.json', '{"ok":true,"error":null}', false, 0],

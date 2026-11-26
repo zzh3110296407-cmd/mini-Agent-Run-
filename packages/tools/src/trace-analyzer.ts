@@ -151,6 +151,7 @@ function structuredFailureField(row: TraceObject) {
 }
 
 const toolFailurePrefix = /^\s*\[?(?:ERROR|FATAL|CRITICAL|EXCEPTION|TRACEBACK)\b/i;
+const nonzeroCommandExit = /(?:^|\r?\n)[ \t]*\[Command finished with exit code -?[1-9]\d*\]$/i;
 
 function errorEvidencePath(row: TraceObject): JsonPath | undefined {
   const toolMessage = isToolMessage(row);
@@ -176,7 +177,9 @@ function errorEvidencePath(row: TraceObject): JsonPath | undefined {
         }
       }
       if (!payload) {
-        if (toolFailurePrefix.test(body)) textFailure ??= [bodyField];
+        if (toolFailurePrefix.test(body) || (nonzeroCommandExit.test(body.trimEnd()) && strongError.test(body))) {
+          textFailure ??= [bodyField];
+        }
         continue;
       }
     }
