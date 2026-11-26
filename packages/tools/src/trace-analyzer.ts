@@ -133,40 +133,60 @@ function recordedError(row: TraceObject) {
   if (error !== undefined && error !== null && error !== false && error !== '') return { field: 'error', failed: true };
 }
 
-function structuredFailureField(row: TraceObject) {
+function structuredResult(row: TraceObject) {
   const marker = recordedError(row);
-  if (marker) return marker.failed ? marker.field : undefined;
-  if (/^(?:error|fatal|failed|failure)$/i.test(text(row.status)?.trim() ?? '')) return 'status';
-  if (row.success === false) return 'success';
-  if (row.ok === false) return 'ok';
+  if (marker) return marker;
+  const status = text(row.status)?.trim() ?? '';
+  if (/^(?:error|fatal|failed|failure)$/i.test(status)) return { field: 'status', failed: true };
+  if (row.success === false) return { field: 'success', failed: true };
+  if (row.ok === false) return { field: 'ok', failed: true };
+  if (row.success === true) return { field: 'success', failed: false };
+  if (row.ok === true) return { field: 'ok', failed: false };
+  if (/^(?:ok|success|succeeded|passed)$/i.test(status)) return { field: 'status', failed: false };
 }
 
+function structuredFailureField(row: TraceObject) {
+  const result = structuredResult(row);
+  return result?.failed ? result.field : undefined;
+}
+
+const toolFailurePrefix = /^\s*\[?(?:ERROR|FATAL|CRITICAL|EXCEPTION|TRACEBACK)\b/i;
+
 function errorEvidencePath(row: TraceObject): JsonPath | undefined {
-  const structured = recordedError(row);
-  if (structured) return structured.failed ? [structured.field] : undefined;
-  if (!isToolMessage(row)) return;
+  const toolMessage = isToolMessage(row);
+  const declared = toolMessage ? structuredResult(row) : recordedError(row);
+  if (declared) return declared.failed ? [declared.field] : undefined;
+  if (!toolMessage) return;
+
+  let payloadSucceeded = false;
+  let textFailure: JsonPath | undefined;
   for (const bodyField of ['content', 'text', 'message']) {
     const value = row[bodyField];
-    const payload = asObject(value);
-    if (payload) {
-      const field = structuredFailureField(payload);
-      if (field !== undefined) return [bodyField, field];
-      continue;
-    }
-    const body = text(value);
-    if (body === undefined) continue;
-    const first = body.trimStart().charAt(0);
-    if (first === '{' || first === '[') {
-      try {
-        const parsed = asObject(JSON.parse(body));
-        if (parsed && structuredFailureField(parsed) !== undefined) return [bodyField];
+    let payload = asObject(value);
+    if (!payload) {
+      const body = text(value);
+      if (body === undefined) continue;
+      const first = body.trimStart().charAt(0);
+      if (first === '{' || first === '[') {
+        try {
+          payload = asObject(JSON.parse(body));
+          if (!payload) continue;
+        } catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+        }
+      }
+      if (!payload) {
+        if (toolFailurePrefix.test(body)) textFailure ??= [bodyField];
         continue;
-      } catch (error) {
-        if (!(error instanceof SyntaxError)) throw error;
       }
     }
-    if (strongError.test(body)) return [bodyField];
+    const result = structuredResult(payload);
+    if (!result) continue;
+    if (result.failed) return typeof value === 'string' ? [bodyField] : [bodyField, result.field];
+    payloadSucceeded = true;
   }
+  // A successful result can quote earlier failures in an accompanying note.
+  return payloadSucceeded ? undefined : textFailure;
 }
 
 function firstEvidence(
@@ -202,15 +222,16 @@ function declaredLevel(value: unknown): LogLevel {
 
 function* logLevelEvidence(row: TraceObject): IterableIterator<{ level: LogLevel; path: JsonPath }> {
   const path = errorEvidencePath(row);
-  const declared = path === undefined ? structuredFailureField(row) : undefined;
+  const declared = path === undefined ? structuredResult(row) : undefined;
   if (path !== undefined) {
     yield { level: 'error', path };
-  } else if (declared !== undefined) {
-    yield { level: 'error', path: [declared] };
+  } else if (declared?.failed) {
+    yield { level: 'error', path: [declared.field] };
   } else {
     const levelField = text(row.level) ? 'level' : 'severity';
     const level = declaredLevel(row[levelField]);
-    if (level !== 'other' && (level !== 'error' || !recordedError(row))) yield { level, path: [levelField] };
+    const result = isToolMessage(row) ? declared : recordedError(row);
+    if (level !== 'other' && (level !== 'error' || !result)) yield { level, path: [levelField] };
   }
 
   const callsField = Array.isArray(row.toolCalls) ? 'toolCalls' : 'tool_calls';

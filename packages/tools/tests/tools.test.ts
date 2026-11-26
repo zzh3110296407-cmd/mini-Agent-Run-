@@ -323,6 +323,34 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     }
   });
 
+  it.each([
+    ['success object and sibling note', { content: { status: 'ok', error: null, matched: 2 },
+      message: 'Checked prior ERROR records' }],
+    ['success flag and sibling note', { success: true, content: { status: 'ok', error: null, matched: 2 },
+      message: 'Checked prior ERROR records' }],
+    ['success flag and quoted log excerpt', { success: true, content: { matched: 2 },
+      message: 'ERROR: Archived failure' }],
+    ['serialized success result and log excerpt', { content: '{"ok":true,"matched":2}',
+      message: 'ERROR: Archived failure' }],
+    ['historical note without status', { content: { matched: 2 }, message: 'Checked prior ERROR records' }],
+  ] as const)('M5.3-03 R2c preserves successful searches with %s', async (_, payload) => {
+    const file = 'search-result.json';
+    const raw = JSON.stringify({ runs: [{ messages: [
+      { role: 'assistant', tool_calls: [{ id: 'read1', name: 'search_logs', arguments: {} }] },
+      { role: 'tool', tool_call_id: 'read1', name: 'search_logs', ...payload },
+    ] }] }, null, 2);
+    const { call } = build({ [file]: raw });
+    const result = await call('inspect_trace', { file });
+    expect(result.isError).toBe(false);
+    expect(result.data).toMatchObject({
+      threeState: { hasToolError: false, toolErrorCount: 0 },
+      toolCalls: [{ step: 0, toolName: 'search_logs', isError: false }],
+      anomalies: { firstError: null },
+    });
+    const classify = createTraceLineClassifier(raw);
+    expect(raw.split('\n').filter((line, index) => classify(line, index + 1) === 'error')).toEqual([]);
+  });
+
   it('uses explicit tool success and retains structured and legacy text failures', async () => {
     const fixtures = [
       ['success.json', '{"ok":true,"error":null}', false, 0],
