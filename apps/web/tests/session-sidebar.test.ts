@@ -525,6 +525,37 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     expect(sessionPosts(fetchImpl)).toEqual([{ targetPath: actualFile }]);
   });
 
+  it('选择路径时拖到遮罩不会关闭窗口，直接点击遮罩仍可取消', async () => {
+    const { wrapper, fetchImpl } = await setup();
+    await openPicker(wrapper);
+    const picker = () => wrapper.find(byTest('path-picker-modal'));
+    const address = wrapper.get(byTest('path-address-input')).element;
+    const backdrop = wrapper.get('.ui-overlay').element;
+    const pointer = (target: Element, type: string) =>
+      target.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 1, button: 0 }));
+    const releaseOnBackdrop = async () => {
+      await wrapper.get('.ui-overlay').trigger('click');
+      await flushPromises();
+    };
+
+    pointer(address, 'pointerdown');
+    pointer(backdrop, 'pointerup');
+    await releaseOnBackdrop();
+    expect(picker().exists()).toBe(true);
+    expect(sessionPosts(fetchImpl)).toEqual([]);
+
+    pointer(backdrop, 'pointerdown');
+    pointer(address, 'pointerup');
+    await releaseOnBackdrop();
+    expect(picker().exists()).toBe(true);
+
+    pointer(backdrop, 'pointerdown');
+    pointer(backdrop, 'pointerup');
+    await releaseOnBackdrop();
+    expect(picker().exists()).toBe(false);
+    expect(sessionPosts(fetchImpl)).toEqual([]);
+  });
+
   it('W1-07 按标题或路径筛选，斜杠聚焦，重挂载恢复最近选中项', async () => {
     const { wrapper, render } = await setup();
     const getItem = (id: string, root = wrapper) => root.get(byTest('session-item') + '[data-session-id="' + id + '"]');

@@ -15,6 +15,7 @@ const emit = defineEmits<{ close: [] }>();
 const panel = ref<HTMLElement | null>(null);
 const titleId = useId();
 let opener: HTMLElement | null = null;
+let backdropPressed = false;
 
 function restoreFocus() {
   if (opener?.isConnected) opener.focus();
@@ -29,6 +30,7 @@ function focusable() {
 }
 
 watch(() => props.open, async (open) => {
+  backdropPressed = false;
   if (!open) {
     restoreFocus();
     return;
@@ -41,6 +43,20 @@ watch(() => props.open, async (open) => {
 }, { immediate: true, flush: 'post' });
 
 onBeforeUnmount(restoreFocus);
+
+function startBackdropPress(event: PointerEvent) {
+  backdropPressed = event.button === 0 && event.target === event.currentTarget;
+}
+
+function finishBackdropPress(event: PointerEvent) {
+  backdropPressed = backdropPressed && event.target === event.currentTarget;
+}
+
+function dismissBackdrop() {
+  const dismiss = backdropPressed && props.dismissOnBackdrop;
+  backdropPressed = false;
+  if (dismiss) emit('close');
+}
 
 function handleKey(event: KeyboardEvent) {
   if (event.defaultPrevented || event.isComposing) return;
@@ -66,7 +82,10 @@ function handleKey(event: KeyboardEvent) {
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="ui-overlay" :class="side" @click.self="dismissOnBackdrop && emit('close')">
+    <div
+      v-if="open" class="ui-overlay" :class="side" @pointerdown.capture="startBackdropPress"
+      @pointerup.capture="finishBackdropPress" @pointercancel.capture="backdropPressed = false" @click.self="dismissBackdrop"
+    >
       <section
         ref="panel" class="ui-dialog" tabindex="-1" :role="role" :aria-labelledby="titleId" aria-modal="true"
         v-bind="$attrs" @keydown="handleKey"
