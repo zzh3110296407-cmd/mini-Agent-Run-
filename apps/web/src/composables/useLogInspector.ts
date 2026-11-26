@@ -13,8 +13,6 @@ type Source =
   | { mode: 'file'; sessionId: SessionId; file?: string }
   | { mode: 'artifact'; sessionId: SessionId; artifactId: ArtifactId };
 type InspectorClient = Pick<typeof apiClient, 'browseFs' | 'getSessionFileSlice' | 'getArtifactSlice'>;
-type BodyPage = { offset: number; matchesBefore: number };
-type PageNavigation = { previous: BodyPage[]; matchesBefore: number; selectLast?: boolean };
 
 const supportedFile = /\.(jsonl?|log|txt)$/iu;
 const pageSize = MAX_ARTIFACT_SLICE_LINES;
@@ -82,15 +80,8 @@ export function useLogInspector({
   const errorHasMore = computed(() => errorNextOffsetLine.value !== null);
   const errorLoading = ref(false);
   const errorFetchError = ref('');
-  const displayedPages = shallowRef<BodyPage[]>([]);
-  const previousPages = shallowRef<BodyPage[]>([]);
-  const bodyStart = computed(() => displayedPages.value[0]?.offset ?? 1);
-  const matchesBeforeWindow = computed(() => displayedPages.value[0]?.matchesBefore ?? 0);
-  const matchInWindow = computed(() => loadedLines.value.findIndex((row) => row.lineNumber === selectedLine.value));
-  const activeMatchIndex = computed(() => searchQuery.value && matchInWindow.value >= 0
-    ? matchesBeforeWindow.value + matchInWindow.value : -1);
-  const nextBodyOffset = computed(() => nextOffset(slice.value));
-  const canGoPrevious = computed(() => previousPages.value.length > 0 || bodyStart.value > 1);
+  const activeMatchIndex = computed(() => searchQuery.value
+    ? loadedLines.value.findIndex((row) => row.lineNumber === selectedLine.value) : -1);
   let filesReady = false;
   let filesToken = 0;
   let sliceToken = 0;
@@ -143,26 +134,22 @@ export function useLogInspector({
     }
   }
 
-  type PageRequest = { append?: boolean; line?: number; step?: number; navigation?: PageNavigation };
-  async function loadBody(offset: number, { append = false, line, step, navigation }: PageRequest = {}) {
+  async function loadBody({ line, step }: { line?: number; step?: number } = {}) {
     const current = source();
     if (!current) return false;
-    const requestOffset = offset;
     const key = selectedKey();
     const token = ++sliceToken;
     const accept = () => token === sliceToken && key === selectedKey();
-    loading.value = !append;
-    loadingMore.value = append;
+    loading.value = true;
+    loadingMore.value = false;
     error.value = '';
     bodyRetry = undefined;
-    if (!append) {
-      loadedLines.value = [];
-      slice.value = null;
-      selectedLine.value = null;
-      scrollRequest.value++;
-    }
+    loadedLines.value = [];
+    slice.value = null;
+    selectedLine.value = null;
+    scrollRequest.value++;
     const query = searchQuery.value;
-    const level = levelFilter.value === 'all' ? undefined : levelFilter.value;
+    const filters = { level: levelFilter.value === 'all' ? undefined : levelFilter.value, q: query || undefined };
     try {
       let target = line;
       if (step !== undefined) {
@@ -170,48 +157,47 @@ export function useLogInspector({
         if (!accept()) return false;
         if (target !== undefined) {
           focusRange.value = { startLine: target, endLine: target };
-          offset = contextStart(target);
         }
       }
-      const searchAnchor = query ? target : undefined;
-      const filters = { level, q: query || undefined };
-      let result = await read(current, searchAnchor === undefined ? offset : 1, filters);
-      let paging = navigation;
-      if (searchAnchor !== undefined) {
-        // An evidence offset is a file coordinate. Follow search cursors to recover rank and earlier pages.
-        const previous: BodyPage[] = [];
-        let matchesBefore = 0;
-        let next = nextOffset(result.slice);
-        while (accept() && next !== null && !result.slice.lines.some(({ lineNumber }) => lineNumber >= searchAnchor)) {
-          previous.push({ offset: result.slice.offsetLine, matchesBefore });
-          matchesBefore += result.slice.lines.length;
-          result = await read(current, next, filters);
-          next = nextOffset(result.slice);
-        }
-        paging = { previous, matchesBefore };
-        const match = result.slice.lines.find(({ lineNumber }) => lineNumber >= searchAnchor) ?? result.slice.lines.at(-1);
-        target = match?.lineNumber;
+      function showTarget(complete: boolean) {
+        const lines = loadedLines.value;
+        const match = query
+          ? lines.find(({ lineNumber }) => lineNumber >= (target ?? 1)) ?? (complete ? lines.at(-1) : undefined)
+          : target === undefined ? undefined : lines.find(({ lineNumber }) => lineNumber === target);
+        if (match && selectedLine.value !== match.lineNumber) selectLine(match.lineNumber);
       }
+
+      // Open evidence near its source immediately, then complete the view from the start.
+      const offset = query || target === undefined ? 1 : contextStart(target);
+      const result = await read(current, offset, filters);
       if (!accept()) return false;
       activeArtifactMeta.value = result.artifact;
       slice.value = result.slice;
-      const previousLines = append ? loadedLines.value : [];
-      // Slice offsets are physical line numbers. Count accepted matches to determine the global ordinal.
-      const page = {
-        offset: result.slice.offsetLine,
-        matchesBefore: append ? matchesBeforeWindow.value + previousLines.length : paging?.matchesBefore ?? 0,
-      };
-      displayedPages.value = append ? [...displayedPages.value, page] : [page];
-      if (paging) previousPages.value = paging.previous;
-      loadedLines.value = orderedLines(previousLines, result.slice.lines);
-      const match = query && !append ? loadedLines.value.at(paging?.selectLast ? -1 : 0) : undefined;
-      const selected = target ?? match?.lineNumber;
-      if (selected !== undefined && loadedLines.value.some(({ lineNumber }) => lineNumber === selected)) selectLine(selected);
+      loadedLines.value = result.slice.lines;
+      let cursor = offset === 1 ? nextOffset(result.slice) : 1;
+      showTarget(cursor === null);
+      if (cursor === null) return true;
+
+      loading.value = false;
+      loadingMore.value = true;
+      const lines = offset === 1 ? [...result.slice.lines] : [];
+      let lastPage = result.slice;
+      while (cursor !== null) {
+        const { slice: page } = await read(current, cursor, filters);
+        if (!accept()) return false;
+        lines.push(...page.lines);
+        lastPage = page;
+        cursor = nextOffset(page);
+      }
+      slice.value = lastPage;
+      loadedLines.value = lines;
+      if (selectedLine.value === null) showTarget(true);
+      else if (offset > 1) scrollRequest.value++;
       return true;
     } catch (issue) {
       if (accept()) {
         error.value = sliceIssue(issue, '无法读取日志切片，请重试。');
-        bodyRetry = () => loadBody(requestOffset, { append, line, step, navigation });
+        bodyRetry = () => loadBody({ line, step });
       }
       return false;
     } finally {
@@ -264,8 +250,6 @@ export function useLogInspector({
     errorNextOffsetLine.value = null;
     errorFetchError.value = '';
     selectedLine.value = null;
-    previousPages.value = [];
-    displayedPages.value = [];
     scrollRequest.value++;
   }
 
@@ -286,7 +270,7 @@ export function useLogInspector({
     const target = evidenceTarget.value;
     const line = focusRange.value?.startLine;
     const step = target?.mode === 'file' && target.line === undefined ? target.step : undefined;
-    void loadBody(line === undefined ? 1 : contextStart(line), { line, step });
+    void loadBody({ line, step });
     void loadErrors();
   }
 
@@ -418,60 +402,28 @@ export function useLogInspector({
     if (visible && !searchQuery.value) { selectLine(line); return; }
     searchQuery.value = '';
     levelFilter.value = 'all';
-    previousPages.value = [];
-    await loadBody(contextStart(line), { line });
+    await loadBody({ line });
   }
 
   function changeQuery(query: string) {
     const normalized = query.trim();
     if (searchQuery.value === normalized) return;
     searchQuery.value = normalized;
-    previousPages.value = [];
-    void loadBody(1);
+    void loadBody();
   }
 
   function changeLevel(level: LogLevelFilter) {
     if (levelFilter.value === level) return;
     levelFilter.value = level;
-    previousPages.value = [];
-    void loadBody(1);
+    void loadBody();
   }
 
-  function nextPage() {
-    const offset = nextBodyOffset.value;
-    if (offset === null || loading.value || loadingMore.value) return;
-    const searching = searchQuery.value !== '';
-    const current = searching ? displayedPages.value : displayedPages.value.slice(0, 1);
-    return loadBody(offset, { navigation: {
-      previous: [...previousPages.value, ...current],
-      matchesBefore: searching ? matchesBeforeWindow.value + loadedLines.value.length : 0,
-    } });
-  }
-
-  function goPrevious(selectLast = false) {
-    if (!canGoPrevious.value || loading.value || loadingMore.value) return;
-    const page = previousPages.value.at(-1) ?? { offset: Math.max(1, bodyStart.value - pageSize), matchesBefore: 0 };
-    return loadBody(page.offset, { navigation: {
-      previous: previousPages.value.slice(0, -1), matchesBefore: page.matchesBefore, selectLast,
-    } });
-  }
-
-  function previousPage() { return goPrevious(); }
-
-  function loadMore() {
-    const offset = nextBodyOffset.value;
-    if (offset === null || loading.value || loadingMore.value) return Promise.resolve(false);
-    return loadBody(offset, { append: true });
-  }
-
-  async function navigateMatch(delta: -1 | 1) {
+  function navigateMatch(delta: -1 | 1) {
     const count = loadedLines.value.length;
-    if (!searchQuery.value || !count || loading.value || loadingMore.value) return;
-    const index = matchInWindow.value < 0 ? (delta === 1 ? 0 : count - 1) : matchInWindow.value + delta;
-    if (index < 0 && previousPages.value.length) { await goPrevious(true); return; }
-    if (index >= count && nextBodyOffset.value !== null) { await nextPage(); return; }
-    const allMatchesLoaded = previousPages.value.length === 0 && nextBodyOffset.value === null;
-    const match = loadedLines.value[allMatchesLoaded ? (index + count) % count : index];
+    if (!searchQuery.value || !count || loading.value || loadingMore.value || error.value) return;
+    const current = activeMatchIndex.value;
+    const index = current < 0 ? (delta === 1 ? 0 : count - 1) : current + delta;
+    const match = loadedLines.value[(index + count) % count];
     if (match) selectLine(match.lineNumber);
   }
 
@@ -479,8 +431,8 @@ export function useLogInspector({
     sourceMode, fileOptions, filePickerOpen, fileListLoading, fileListError, selectedFilePath, activeArtifactId, activeArtifactMeta,
     slice, loadedLines, loading, loadingMore, error, levelFilter, searchQuery, activeMatchIndex,
     evidenceTarget, focusRange, selectedLine, stepNotice, scrollRequest, errorRows, errorTotalCount,
-    errorNextOffsetLine, errorHasMore, errorLoading, errorFetchError, nextBodyOffset, canGoPrevious,
-    openTarget, returnToOriginalFile, chooseFile, jumpToLine, changeQuery, changeLevel, nextPage, previousPage, loadMore, navigateMatch,
+    errorNextOffsetLine, errorHasMore, errorLoading, errorFetchError,
+    openTarget, returnToOriginalFile, chooseFile, jumpToLine, changeQuery, changeLevel, navigateMatch,
     retryFiles: browse, retryBody: () => bodyRetry?.(),
     retryErrors: () => loadErrors(errorRows.value.length > 0), loadMoreErrors: () => loadErrors(true),
   };

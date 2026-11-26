@@ -297,20 +297,18 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     });
     const api = mockLogs({ files: { [single.targetPath]: logs } });
     const ui = await inspectorFor(single);
-    expect([1, 20, 21, 200].map((number) => ui.line(number).attributes('data-level'))).toEqual(['info', 'info', 'error', 'error']);
+    expect([1, 20, 21, 200].map((number) => ui.inspector.loadedLines.value[number - 1]?.level))
+      .toEqual(['info', 'info', 'error', 'error']);
+    expect(ui.el('log-body-range').text()).toBe('1–1600 / 1600 行');
     expect(ui.el('log-error-count').text()).toBe('204');
-    const indexCalls = api.calls.filter((url) => url.searchParams.get('level') === 'error').length;
-    await click(ui.wrapper, 'log-next-page');
-    expect(ui.wrapper.find(test('log-line') + lineAttr(201)).exists()).toBe(true);
-    await click(ui.wrapper, 'log-prev-page');
-    expect(ui.wrapper.find(test('log-line') + lineAttr(1)).exists()).toBe(true);
-    expect(api.calls.filter((url) => url.searchParams.get('level') === 'error')).toHaveLength(indexCalls);
+    expect(api.calls.filter((url) => url.searchParams.get('level') === 'error')).toHaveLength(1);
     await click(ui.wrapper, 'log-load-more-errors');
     expect(api.see(fileRoute(single), { level: 'error', startLine: '221' })).toBe(true);
     expect(ui.wrapper.findAll(test('log-error-jump'))).toHaveLength(204);
+    const reads = api.calls.length;
     await ui.errorAt(1420).trigger('click');
     await flushPromises();
-    expect(api.see(fileRoute(single), { startLine: '1380', q: null, level: null })).toBe(true);
+    expect(api.calls).toHaveLength(reads);
     expect(ui.line(1419).text()).toContain('INFO context 1419');
     expect(ui.line(1420).attributes('data-selected')).toBe('true');
     expect(ui.line(1421).text()).toContain('INFO context 1421');
@@ -363,7 +361,7 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     expect(ui.el('log-error-index').text()).toContain('当前来源无错误行');
   });
 
-  it('W3-07 以全文件命中序号在 L200 与 L201 之间往返，追加后仍按命中游标翻页', async () => {
+  it('W3-07 自动读取全部命中，以全文件序号越过 L200 并在稀疏命中之间往返', async () => {
     const keyword = 'component=local-collector';
     const logs = rows(Array.from({ length: 2200 }, (_, index) =>
       index >= 205 && index < 214 ? 'INFO unmatched' : 'INFO ' + keyword));
@@ -378,15 +376,18 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     await ui.wrapper.get('form').trigger('submit');
     await flushPromises();
     position(1, 1);
-    await click(ui.wrapper, 'log-next-page');
+    for (let i = 1; i < 200; i++) ui.inspector.navigateMatch(1);
+    await nextTick();
+    position(200, 200);
+    await click(ui.wrapper, 'log-search-next');
     position(201, 201);
     await click(ui.wrapper, 'log-search-prev');
     position(200, 200);
     await click(ui.wrapper, 'log-search-next');
     position(201, 201);
 
-    await click(ui.wrapper, 'log-load-more');
-    await click(ui.wrapper, 'log-next-page');
+    for (let i = 201; i <= 600; i++) ui.inspector.navigateMatch(1);
+    await nextTick();
     const fourthStart = matches[600]!.lineNumber;
     expect(api.see(fileRoute(single), { q: keyword, startLine: String(fourthStart) })).toBe(true);
     position(fourthStart, 601);
@@ -453,18 +454,16 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     position(401, 201);
   });
 
-  it('W3-08 多页累积 2480 行并以固定 24 px 虚拟窗口响应滚动', async () => {
+  it('W3-08 自动读取 2480 行并以固定 24 px 虚拟窗口响应滚动和完整复制', async () => {
     const log = large(2480, {}, ' ' + 'x'.repeat(152));
     expect(log.reduce((count, row) => count + row.text.length + 1, 0)).toBeGreaterThan(350_000);
     const api = mockLogs({ files: { [single.targetPath]: log } });
+    const clipboard = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
     const ui = await inspectorFor(single);
-    let pages = 1;
-    while (ui.wrapper.find(test('log-load-more')).exists() && pages <= 13) {
-      await click(ui.wrapper, 'log-load-more');
-      pages++;
-    }
-    expect(pages).toBe(13);
+    expect(api.calls.filter((url) => same(url, fileRoute(single), { level: null }))).toHaveLength(13);
     expect(api.see(fileRoute(single), { startLine: '2401', limit: '200' })).toBe(true);
+    expect(ui.el('log-body-range').text()).toBe('1–2480 / 2480 行');
+    expect(ui.wrapper.find(test('log-load-more')).exists()).toBe(false);
     const viewport = ui.wrapper.get<HTMLElement>(test('log-scroll-container'));
     expect(viewport.find('[data-content-height="59520"]').exists()).toBe(true);
     const lineCount = () => ui.wrapper.findAll(test('log-line')).length;
@@ -480,6 +479,8 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
       (total, item) => total + (item.hasAttribute('data-content-height') ? lineCount() * 24 : parseInt((item as HTMLElement).style.height, 10)), 0,
     );
     expect(geometry).toBe(2480 * 24);
+    await click(ui.wrapper, 'log-copy-btn');
+    expect(clipboard).toHaveBeenCalledWith(log.map(({ text }) => text).join('\n'));
   });
 
   it('U2-06/W3-09 美化 JSONL 保留行号、原文复制、搜索高亮与错误摘要的恶意文本', async () => {
@@ -529,8 +530,6 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     log[298]!.level = 'error';
     mockLogs({ files: { [single.targetPath]: log } });
     const ui = await inspectorFor(single);
-    await click(ui.wrapper, 'log-load-more');
-    await click(ui.wrapper, 'log-load-more');
     const viewport = ui.wrapper.get<HTMLElement>(test('log-scroll-container'));
     expect(viewport.find('[data-content-height="20160"]').exists()).toBe(true);
     expect(ui.wrapper.findAll(test('log-line')).length).toBeLessThan(90);
@@ -542,6 +541,23 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
     expect(ui.line(299).attributes('data-selected')).toBe('true');
     expect(ui.wrapper.find(test('log-line') + lineAttr(1)).exists()).toBe(false);
     expect(ui.wrapper.findAll(test('log-line')).length).toBeLessThan(90);
+  });
+
+  it('W3-03 切换日志会丢弃正在自动加载的旧文件切片', async () => {
+    const api = mockLogs({ files: { [single.targetPath]: large(480) } });
+    const release = api.hold(fileRoute(single) + '?startLine=201&limit=200');
+    const ui = await inspectorFor(single);
+    expect(ui.el('log-body-range').text()).toBe('1–200 / 480 行');
+    expect(ui.el('log-copy-btn').attributes('disabled')).toBeDefined();
+    expect(ui.wrapper.text()).toContain('正在加载剩余日志');
+    ui.sessionRef.value = session;
+    await flushPromises();
+    release();
+    await flushPromises();
+    expect(ui.line(1).text()).toContain('first source');
+    expect(ui.el('log-body-range').text()).toBe('1–2 / 2 行');
+    expect(api.see(fileRoute(single), { level: null, startLine: '401' })).toBe(false);
+    expect(ui.el('log-copy-btn').attributes('disabled')).toBeUndefined();
   });
 
   it('W3-10 App 串联三类证据与工具入口，窄屏 Escape 优先关闭文件弹层', async () => {

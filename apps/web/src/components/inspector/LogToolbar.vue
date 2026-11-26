@@ -8,7 +8,7 @@ import UiIcon from '../ui/UiIcon.vue';
 const props = defineProps<{ inspector: ReturnType<typeof useLogInspector> }>();
 const {
   sourceMode, fileOptions, filePickerOpen, fileListLoading, fileListError, selectedFilePath,
-  activeArtifactId, activeArtifactMeta, slice, loading, loadingMore, focusRange, levelFilter, evidenceTarget,
+  activeArtifactId, activeArtifactMeta, slice, loadedLines, loading, loadingMore, error, focusRange, levelFilter, evidenceTarget,
   searchQuery, activeMatchIndex, changeQuery, changeLevel, chooseFile,
   navigateMatch, jumpToLine, returnToOriginalFile, retryFiles,
 } = props.inspector;
@@ -30,7 +30,7 @@ watch([searchQuery, sourceMode, selectedFilePath, activeArtifactId, evidenceTarg
   clearTimeout(debounce);
   draft.value = value;
 });
-watch(slice, () => { copyStatus.value = ''; });
+watch(loadedLines, () => { copyStatus.value = ''; });
 onScopeDispose(() => clearTimeout(debounce));
 
 function submitSearch() {
@@ -47,15 +47,15 @@ function inputSearch(event: Event) {
 }
 
 async function copy() {
-  const current = slice.value;
-  if (!current) return;
-  const text = current.lines.map((line) => line.text).join('\n');
+  const current = loadedLines.value;
+  if (loading.value || loadingMore.value || error.value || !current.length) return;
+  const text = current.map((line) => line.text).join('\n');
   try {
     if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable.');
     await navigator.clipboard.writeText(text);
-    if (slice.value === current) copyStatus.value = '已复制';
+    if (loadedLines.value === current) copyStatus.value = '已复制';
   } catch {
-    if (slice.value === current) copyStatus.value = '无法复制';
+    if (loadedLines.value === current) copyStatus.value = '无法复制';
   }
 }
 
@@ -111,11 +111,11 @@ function jumpEvidence() {
       </div>
       <UiButton
         variant="ghost" size="sm" data-testid="log-search-prev" aria-label="上一处命中" title="上一处命中"
-        :disabled="!searchQuery || !slice?.matchedLines || loading || loadingMore" @click="navigateMatch(-1)"
+        :disabled="!searchQuery || !slice?.matchedLines || loading || loadingMore || !!error" @click="navigateMatch(-1)"
       ><UiIcon name="chevron-up" :size="14" /></UiButton>
       <UiButton
         variant="ghost" size="sm" data-testid="log-search-next" aria-label="下一处命中" title="下一处命中"
-        :disabled="!searchQuery || !slice?.matchedLines || loading || loadingMore" @click="navigateMatch(1)"
+        :disabled="!searchQuery || !slice?.matchedLines || loading || loadingMore || !!error" @click="navigateMatch(1)"
       ><UiIcon name="chevron-down" :size="14" /></UiButton>
       <output v-if="searchQuery" class="match-count tabular-nums" data-testid="log-match-count" aria-live="polite">
         {{ activeMatchIndex + 1 }} / {{ slice?.matchedLines ?? 0 }} 命中
@@ -129,7 +129,10 @@ function jumpEvidence() {
           :aria-pressed="levelFilter === level" :data-log-level="level" @click="changeLevel(level)"
         >{{ level.toUpperCase() }}</UiButton>
       </div>
-      <UiButton variant="ghost" size="sm" data-testid="log-copy-btn" :disabled="!slice?.lines.length" @click="copy">
+      <UiButton
+        variant="ghost" size="sm" data-testid="log-copy-btn" :disabled="!loadedLines.length || loading || loadingMore || !!error"
+        @click="copy"
+      >
         <UiIcon name="copy" :size="13" />复制
       </UiButton>
       <UiButton v-if="focusRange" size="sm" variant="ghost" data-testid="log-jump-evidence-btn" @click="jumpEvidence">
