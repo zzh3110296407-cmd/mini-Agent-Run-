@@ -1,4 +1,4 @@
-import type { LLMProvider } from '@mini-agent-run/ai';
+import { createMockLLMProvider, type LLMProvider } from '@mini-agent-run/ai';
 import { RunEventEnvelopeSchema, type InvestigationRun } from '@mini-agent-run/shared';
 import fc from 'fast-check';
 import assert from 'node:assert/strict';
@@ -33,6 +33,46 @@ const lateEnd = { type: 'agent_end', status: 'completed', stopReason: 'completed
 type StoredRun = Pick<InvestigationRun, 'id' | 'status'> & { session_id: string; last_seq: number };
 
 describe('F06_RUN_STOP_AND_INVARIANTS SQLite and runtime state machine', () => {
+  it('T3-06 preserves the channel and order of randomly interleaved reasoning and text', async () => {
+    const db = openAppDatabase(':memory:');
+    const store = createSqliteRunStore(db);
+    const session = createSession(db, { targetPath: '/fixture', pathType: 'dir' });
+    try {
+      await fc.assert(fc.asyncProperty(fc.array(fc.constantFrom('reasoning_delta', 'text_delta'), {
+        minLength: 2, maxLength: 18,
+      }), async (types) => {
+        const expected = types.map((type, index) => ({ type, delta: String.fromCharCode(65 + index) }));
+        const join = (type: string) => expected.filter((chunk) => chunk.type === type).map(({ delta }) => delta).join('');
+        const provider = createMockLLMProvider({ turns: [{ chunks: [...expected, { type: 'done', stopReason: 'stop' }] }] });
+        const coordinator = createRunCoordinator({
+          store, artifactStore: createSqliteArtifactStore(db),
+          resolveProvider: () => ({ provider, modelId: 'fixture', providerName: provider.name }),
+          createWorkspace: createServerTraceWorkspace, resolveAllowedRoots: () => [], toolMode: 'mock',
+          coalesceMaxChars: 4,
+        });
+        try {
+          const run = coordinator.startRun(session.id, { prompt: 'Start' });
+          const events = await Array.fromAsync(coordinator.subscribeRunStream(run.id, 0));
+          const deltas = events.flatMap(({ event }) => event.type === 'message_update'
+            ? Array.from(event.delta, (delta) => ({ type: event.deltaType, delta })) : []);
+          expect(deltas).toEqual(expected);
+          expect(events.find(({ event }) => event.type === 'message_end')?.event).toMatchObject({
+            message: { content: join('text_delta') },
+          });
+          const messageEnd = events.find(({ event }) => event.type === 'message_end')?.event;
+          expect(messageEnd?.type === 'message_end' ? messageEnd.message.reasoningContent : undefined)
+            .toBe(join('reasoning_delta') || undefined);
+          expect(events.at(-1)?.event).toMatchObject({ type: 'agent_end', status: 'completed' });
+          expect(store.listRunEvents(run.id)).toEqual(events);
+        } finally {
+          await coordinator.shutdown();
+        }
+      }), { seed: 20261126, numRuns: 30 });
+    } finally {
+      db.close();
+    }
+  });
+
   it('preserves four AgentRun.tla properties over generated start/stop/retry/recovery interleavings', async () => {
     await fc.assert(fc.asyncProperty(fc.array(operation, { minLength: 8, maxLength: 15 }), async (operations) => {
       const db = openAppDatabase(':memory:');

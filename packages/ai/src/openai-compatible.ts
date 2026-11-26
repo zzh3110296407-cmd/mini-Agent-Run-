@@ -27,11 +27,13 @@ export function resolveChatCompletionsUrl(baseUrl: string): string {
 function toWireMessage(message: LLMMessage) {
   const { role, content } = message;
   if (role === 'tool') return { role, content, tool_call_id: message.toolCallId };
-  if (role === 'assistant' && message.toolCalls?.length) {
+  if (role === 'assistant') {
     return {
-      role, content, tool_calls: message.toolCalls.map(({ id, name, arguments: args }) => ({
+      role, content,
+      ...(message.reasoningContent === undefined ? {} : { reasoning_content: message.reasoningContent }),
+      ...(message.toolCalls?.length ? { tool_calls: message.toolCalls.map(({ id, name, arguments: args }) => ({
         id, type: 'function', function: { name, arguments: JSON.stringify(args) },
-      })),
+      })) } : {}),
     };
   }
   return { role, content };
@@ -143,6 +145,9 @@ async function* streamCompletion(
     const { delta } = choice;
     if (delta === undefined) continue;
     if (!isObject(delta)) throw protocol('The model stream event has an invalid delta.');
+    if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+      yield { type: 'reasoning_delta', delta: delta.reasoning_content };
+    }
     if (typeof delta.content === 'string' && delta.content) yield { type: 'text_delta', delta: delta.content };
     if (delta.tool_calls === undefined) continue;
     if (!Array.isArray(delta.tool_calls)) throw protocol('The model stream contains invalid tool calls.');
@@ -175,7 +180,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
   readonly #timeoutMs: number;
   readonly #fetch: typeof fetch;
 
-  constructor({ baseUrl, apiKey, providerName = 'openai-compatible', timeoutMs = 60_000, fetchImpl = fetch }:
+  constructor({ baseUrl, apiKey, providerName = 'openai-compatible', timeoutMs = 300_000, fetchImpl = fetch }:
     OpenAICompatibleProviderOptions) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) {
       throw new LLMProviderError('LLM_BAD_REQUEST', 'The model request timeout is invalid.');
@@ -214,13 +219,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
     try {
       let body: string;
       try {
-        // DeepSeek thinking mode requires replaying reasoning content along with tool history.
-        const deepSeekFlashTools = tools?.length && new URL(this.#endpoint).origin === 'https://api.deepseek.com'
-          && (model === 'deepseek-flash' || model === 'deepseek-v4-flash');
+        const deepSeek = new URL(this.#endpoint).origin === 'https://api.deepseek.com';
         body = JSON.stringify({
           model, messages: messages.map(toWireMessage),
           ...(tools?.length ? { tools: tools.map((tool) => ({ type: 'function', function: tool })) } : {}),
-          ...(deepSeekFlashTools ? { thinking: { type: 'disabled' } } : {}),
+          ...(deepSeek ? { thinking: { type: 'enabled' } } : {}),
           stream: true,
         });
       } catch {

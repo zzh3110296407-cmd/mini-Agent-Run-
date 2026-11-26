@@ -7,6 +7,7 @@ import type { LLMGenerateRequest, LLMProvider, LLMStreamChunk } from './index.js
 export interface MockLLMTurn {
   chunks?: readonly LLMStreamChunk[];
   text?: string;
+  reasoning?: string;
   chunkSize?: number;
   toolCalls?: readonly ToolCallRequest[];
   delayMs?: number;
@@ -18,12 +19,16 @@ export interface MockLLMProviderOptions {
   turns: readonly MockLLMTurn[] | ((request: LLMGenerateRequest, callIndex: number) => MockLLMTurn);
 }
 
-function* scriptedChunks({ text = '', chunkSize, toolCalls = [], error }: MockLLMTurn): Generator<LLMStreamChunk> {
-  const characters = Array.from(text);
-  const size = chunkSize ?? Math.max(characters.length, 1);
-  if (!Number.isSafeInteger(size) || size < 1) throw new LLMProviderError('LLM_BAD_REQUEST', 'The mock chunk size is invalid.');
-  for (let index = 0; index < characters.length; index += size) {
-    yield { type: 'text_delta', delta: characters.slice(index, index + size).join('') };
+function* scriptedChunks({ text = '', reasoning = '', chunkSize, toolCalls = [], error }: MockLLMTurn): Generator<LLMStreamChunk> {
+  if (chunkSize !== undefined && (!Number.isSafeInteger(chunkSize) || chunkSize < 1)) {
+    throw new LLMProviderError('LLM_BAD_REQUEST', 'The mock chunk size is invalid.');
+  }
+  for (const [type, value] of [['reasoning_delta', reasoning], ['text_delta', text]] as const) {
+    const characters = Array.from(value);
+    const size = chunkSize ?? Math.max(characters.length, 1);
+    for (let index = 0; index < characters.length; index += size) {
+      yield { type, delta: characters.slice(index, index + size).join('') };
+    }
   }
   for (const toolCall of toolCalls) yield { type: 'toolcall_complete', toolCall };
   if (!error) yield { type: 'done', stopReason: toolCalls.length ? 'tool_calls' : 'stop' };

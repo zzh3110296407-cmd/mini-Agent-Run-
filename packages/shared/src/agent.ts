@@ -28,6 +28,7 @@ export const ToolOutputSummarySchema = z.object({
 const message = z.object({ id: MessageIdSchema, content: z.string(), createdAt: IsoDateTimeSchema });
 const assistantMessage = message.extend({
   role: z.literal('assistant'),
+  reasoningContent: z.string().optional(),
   toolCalls: z.array(ToolCallRequestSchema),
   stopReason: z.enum(['stop', 'tool_calls', 'aborted', 'error']).optional(),
 });
@@ -119,7 +120,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('message_update'),
     messageId: MessageIdSchema,
-    deltaType: z.enum(['text_delta', 'toolcall_delta']),
+    deltaType: z.enum(['text_delta', 'reasoning_delta', 'toolcall_delta']),
     delta: z.string(),
     toolCallId: ToolCallIdSchema.optional(),
     toolName: toolName.optional(),

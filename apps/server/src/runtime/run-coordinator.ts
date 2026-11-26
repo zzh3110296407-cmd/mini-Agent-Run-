@@ -64,7 +64,7 @@ export function createRunCoordinator({
     let ended = false;
     let writeFailed = false;
     let buffered: Delta | undefined;
-    let deltaTail: Delta | undefined;
+    const deltaTails = new Map<string, Delta>();
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     function append(event: Exclude<AgentEvent, AgentEndEvent>) {
@@ -79,31 +79,36 @@ export function createRunCoordinator({
       if (delta) append(delta);
     }
 
-    function flushTail() {
-      const delta = deltaTail;
-      deltaTail = undefined;
-      if (delta && delta.delta) {
-        if (delta.deltaType === 'text_delta' && buffered) buffered.delta += redact.text(delta.delta);
-        else append({ ...redactEvent(delta, redact), delta: redact.text(delta.delta) });
+    function sameStream(first: Delta, second: Delta) {
+      return first.messageId === second.messageId && first.deltaType === second.deltaType
+        && first.toolCallId === second.toolCallId;
+    }
+
+    function flushTails() {
+      for (const delta of deltaTails.values()) {
+        const safe = redact.text(delta.delta);
+        if (buffered && sameStream(buffered, delta)) buffered.delta += safe;
+        else {
+          flush();
+          append({ ...redactEvent(delta, redact), delta: safe });
+        }
       }
+      deltaTails.clear();
     }
 
     function onEvent(event: AgentEvent) {
       if (event.type === 'message_update') {
-        if (deltaTail && (deltaTail.messageId !== event.messageId || deltaTail.deltaType !== event.deltaType
-          || deltaTail.toolCallId !== event.toolCallId)) {
-          flushTail();
-          flush();
-        }
-        const { safe, tail } = redact.splitDelta((deltaTail?.delta ?? '') + event.delta);
+        if (buffered && !sameStream(buffered, event)) flush();
+        // Hold potential secret prefixes per stream, including across interleaved delta types.
+        const key = JSON.stringify([event.messageId, event.deltaType, event.toolCallId]);
+        const { safe, tail } = redact.splitDelta((deltaTails.get(key)?.delta ?? '') + event.delta);
+        if (tail) deltaTails.set(key, { ...event, delta: tail });
+        else deltaTails.delete(key);
         const metadata = redactEvent(event, redact);
-        deltaTail = tail ? { ...event, delta: tail } : undefined;
         if (event.deltaType === 'toolcall_delta') {
-          flush();
           if (safe || !event.delta) append({ ...metadata, delta: safe });
           return;
         }
-        if (buffered && buffered.messageId !== event.messageId) flush();
         if (safe) {
           if (buffered) buffered.delta += safe;
           else buffered = { ...metadata, delta: safe };
@@ -120,7 +125,7 @@ export function createRunCoordinator({
         return;
       }
 
-      flushTail();
+      flushTails();
       flush();
       const sanitized = redactEvent(event, redact);
       if (sanitized.type === 'agent_end') {
@@ -131,7 +136,7 @@ export function createRunCoordinator({
     }
 
     active.flush = () => {
-      flushTail();
+      flushTails();
       flush();
     };
     try {
@@ -155,7 +160,7 @@ export function createRunCoordinator({
       if (!ended) throw new Error('The run did not persist an ending.');
     } catch {
       try {
-        flushTail();
+        flushTails();
         flush();
       } finally {
         const durationMs = Math.floor(performance.now() - start);

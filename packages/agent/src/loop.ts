@@ -112,6 +112,10 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentS
         switch (chunk.type) {
           case 'done':
             return;
+          case 'reasoning_delta':
+            assistant.reasoningContent = (assistant.reasoningContent ?? '') + chunk.delta;
+            await emit({ type: 'message_update', messageId: assistant.id, deltaType: chunk.type, delta: chunk.delta });
+            break;
           case 'text_delta':
             assistant.content += chunk.delta;
             await emit({ type: 'message_update', messageId: assistant.id, deltaType: chunk.type, delta: chunk.delta });

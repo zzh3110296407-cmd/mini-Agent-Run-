@@ -63,6 +63,8 @@ export function redactEvent(event: AgentEvent, redact: RunRedactor): AgentEvent 
     case 'message_end':
       return AgentEventSchema.parse({ ...event, message: {
         ...event.message, content: redact.text(event.message.content),
+        ...(event.message.reasoningContent === undefined ? {}
+          : { reasoningContent: redact.text(event.message.reasoningContent) }),
         toolCalls: event.message.toolCalls.map((call) => ({
           id: toolId(call.id, redact), name: redact.text(call.name), arguments: scrubJson(call.arguments, redact),
         })),

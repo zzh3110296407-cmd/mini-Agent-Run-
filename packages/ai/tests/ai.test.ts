@@ -126,42 +126,65 @@ describe('[F05_MULTI_TURN_INVESTIGATION] OpenAI-compatible model gateway', () =>
     });
   });
 
-  it('F12_E2E_VERIFICATION_SUITE resumes a DeepSeek Flash tool call without reasoning content', async () => {
+  it('F12_E2E_VERIFICATION_SUITE resumes DeepSeek Flash thinking across tool calls', async () => {
     const flash = { ...request, model: 'deepseek-flash', tools: [
       { name: call.name, description: 'Inspect trace', parameters: { type: 'object' } },
     ] };
+    const thoughts = ['Read the event list.', 'Check the tool result.'];
     const sent: unknown[] = [];
     const provider = createOpenAICompatibleProvider({ baseUrl: 'https://api.deepseek.com', apiKey,
       fetchImpl: async (_input, init) => {
-        const body = JSON.parse(String(init?.body));
+        const body = JSON.parse(String(init?.body)) as {
+          thinking?: { type: string }; messages: { role: string; tool_calls?: unknown[]; reasoning_content?: string }[];
+        };
         sent.push(body.thinking);
-        if (body.messages.some(({ role }: { role: string }) => role === 'tool')) {
-          if (body.thinking?.type !== 'disabled') {
-            return new Response('reasoning_content is required for tool history in thinking mode', { status: 400 });
-          }
-          return new Response(event({ content: 'Trace inspected.' }, 'stop') + done);
+        const turns = body.messages.filter(({ role, tool_calls }) => role === 'assistant' && tool_calls?.length);
+        if (body.thinking?.type !== 'enabled' || turns.some((turn, index) => turn.reasoning_content !== thoughts[index])) {
+          return new Response('reasoning_content is required for tool history in thinking mode', { status: 400 });
         }
-        const delta = { tool_calls: [{ index: 0, id: call.id,
+        const reasoning = thoughts[turns.length];
+        if (reasoning === undefined) return new Response(event({ content: 'Trace inspected.' }, 'stop') + done);
+        const delta = { tool_calls: [{ index: 0, id: call.id + '_' + turns.length,
           function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] };
-        return new Response(event(delta, 'tool_calls') + done);
+        return new Response(event({ reasoning_content: reasoning.slice(0, 7) })
+          + event({ reasoning_content: reasoning.slice(7) }) + event(delta, 'tool_calls') + done);
       },
     });
-    const first = await collect(provider.stream(flash));
-    const tool = first.find((chunk) => chunk.type === 'toolcall_complete')?.toolCall;
-    expect(tool).toEqual(call);
-    if (!tool) throw new Error('Missing initial tool call.');
-    await expect(collect(provider.stream({ ...flash, messages: [...flash.messages,
-      { role: 'assistant', content: '', toolCalls: [tool] },
-      { role: 'tool', toolCallId: tool.id, name: tool.name, content: 'Synthetic trace evidence' },
-    ] }))).resolves.toEqual([
+    const messages = [...flash.messages];
+    for (const [index, reasoningContent] of thoughts.entries()) {
+      const chunks = await collect(provider.stream({ ...flash, messages }));
+      expect(chunks.filter(({ type }) => type === 'reasoning_delta')).toEqual([
+        { type: 'reasoning_delta', delta: reasoningContent.slice(0, 7) },
+        { type: 'reasoning_delta', delta: reasoningContent.slice(7) },
+      ]);
+      const tool = chunks.find((chunk) => chunk.type === 'toolcall_complete')?.toolCall;
+      if (!tool) throw new Error('Missing tool call.');
+      expect(tool).toEqual({ ...call, id: call.id + '_' + index });
+      const withToolResult = [
+        ...messages, { role: 'assistant', content: '', toolCalls: [tool] },
+        { role: 'tool', toolCallId: tool.id, name: tool.name, content: 'Synthetic trace evidence' },
+      ] satisfies LLMGenerateRequest['messages'];
+      if (index === 0) {
+        await expect(collect(provider.stream({ ...flash, messages: withToolResult })))
+          .rejects.toMatchObject({ code: 'LLM_BAD_REQUEST', statusCode: 400 });
+      }
+      messages.push({ role: 'assistant', content: '', toolCalls: [tool], reasoningContent }, withToolResult.at(-1)!);
+    }
+    await expect(collect(provider.stream({ ...flash, messages }))).resolves.toEqual([
       { type: 'text_delta', delta: 'Trace inspected.' }, { type: 'done', stopReason: 'stop' },
     ]);
-    expect(sent).toEqual([{ type: 'disabled' }, { type: 'disabled' }]);
+    expect(sent).toEqual(Array.from({ length: 4 }, () => ({ type: 'enabled' })));
 
     const otherFetch = vi.fn<typeof fetch>(async () => new Response(event({ content: 'OK' }, 'stop') + done));
     const compatible = createOpenAICompatibleProvider({ baseUrl, apiKey, fetchImpl: otherFetch });
-    await collect(compatible.stream(flash));
-    expect(JSON.parse(String(otherFetch.mock.calls[0]?.[1]?.body))).not.toHaveProperty('thinking');
+    await collect(compatible.stream({ ...flash, messages: [...flash.messages,
+      { role: 'assistant', content: 'OK', reasoningContent: 'A thought without tools.' },
+    ] }));
+    const otherBody = JSON.parse(String(otherFetch.mock.calls[0]?.[1]?.body));
+    expect(otherBody).not.toHaveProperty('thinking');
+    expect(otherBody).toMatchObject({ messages: [
+      { role: 'user' }, { role: 'assistant', content: 'OK', reasoning_content: 'A thought without tools.' },
+    ] });
   });
 
   it('keeps an emitted ID stable when the upstream ID arrives late and uses early known IDs', async () => {
@@ -297,6 +320,40 @@ describe('[F05_MULTI_TURN_INVESTIGATION] OpenAI-compatible model gateway', () =>
       expect(await iterator.return(undefined)).toEqual({ done: true, value: undefined });
       expect(cancel).toHaveBeenCalledOnce();
       expect(body.locked).toBe(false);
+    } finally {
+      await iterator.return(undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['abort', 'LLM_ABORTED'],
+    ['deadline', 'LLM_TIMEOUT'],
+  ] as const)('T3-03 handles %s immediately during a paused reasoning stream with the 300s default', async (mode, code) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const controller = new AbortController();
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(sink) {
+        sink.enqueue(encoder.encode(event({ reasoning_content: 'First', content: 'Already buffered' })));
+      },
+      cancel,
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(body));
+    const provider = createOpenAICompatibleProvider({ baseUrl, apiKey, fetchImpl });
+    const iterator = provider.stream({ ...request, signal: controller.signal });
+    try {
+      expect(await iterator.next()).toEqual({ done: false, value: { type: 'reasoning_delta', delta: 'First' } });
+      await vi.advanceTimersByTimeAsync(299_999);
+      expect(fetchImpl.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+      expect(body.locked).toBe(true);
+      if (mode === 'abort') controller.abort();
+      else await vi.advanceTimersByTimeAsync(1);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(body.locked).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      await expect(iterator.next()).rejects.toMatchObject({ code });
     } finally {
       await iterator.return(undefined);
       vi.useRealTimers();

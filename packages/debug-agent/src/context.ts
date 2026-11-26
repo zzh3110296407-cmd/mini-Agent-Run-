@@ -39,7 +39,9 @@ export function estimateTokenCount(text: string): number {
 function estimateMessageTokens(message: AgentMessage): number {
   const calls = message.role === 'assistant' && message.toolCalls.length
     ? estimateTokenCount(JSON.stringify(message.toolCalls)) : 0;
-  return messageOverhead + calls + estimateTokenCount(message.content);
+  const reasoning = message.role === 'assistant' && message.reasoningContent !== undefined
+    ? estimateTokenCount(message.reasoningContent) : 0;
+  return messageOverhead + calls + reasoning + estimateTokenCount(message.content);
 }
 
 export function estimateMessagesTokens(messages: readonly AgentMessage[]): number {

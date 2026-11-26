@@ -1,4 +1,4 @@
-import { createMockLLMProvider } from '@mini-agent-run/ai';
+import { createMockLLMProvider, type MockLLMTurn } from '@mini-agent-run/ai';
 import { describe, expect, it } from 'vitest';
 import { createSqliteArtifactStore } from '../src/db/artifact-store.js';
 import { openAppDatabase } from '../src/db/database.js';
@@ -8,11 +8,15 @@ import { createServerTraceWorkspace } from '../src/fs/trace-workspace.js';
 import { createRunCoordinator } from '../src/runtime/run-coordinator.js';
 import { createRunRedactor } from '../src/runtime/run-redaction.js';
 
-async function withRun(test: (coordinator: ReturnType<typeof createRunCoordinator>, sessionId: string) => Promise<void>) {
+const key = 'fixture-' + 'private';
+
+async function withRun(
+  test: (coordinator: ReturnType<typeof createRunCoordinator>, sessionId: string) => Promise<void>,
+  turn: MockLLMTurn = { text: 'begin ' + key + ' end', chunkSize: 1 },
+) {
   const db = openAppDatabase(':memory:');
   const session = createSession(db, { targetPath: '/fixture', pathType: 'dir' });
-  const key = 'fixture-' + 'private';
-  const provider = createMockLLMProvider({ turns: [{ text: 'begin ' + key + ' end', chunkSize: 1 }] });
+  const provider = createMockLLMProvider({ turns: [turn] });
   const coordinator = createRunCoordinator({
     store: createSqliteRunStore(db), artifactStore: createSqliteArtifactStore(db), createWorkspace: createServerTraceWorkspace,
     resolveProvider: () => ({
@@ -59,4 +63,27 @@ describe('M2.3 Run coordinator', () => {
       expect(await Array.fromAsync(coordinator.subscribeRunStream(run.id, 2))).toEqual(events.slice(2));
       expect(coordinator.subscriberCount).toBe(0);
     }));
+
+  it('T3-06 scrubs reasoning deltas and the terminal message across an intervening text delta', () =>
+    withRun(async (coordinator, sessionId) => {
+      const run = coordinator.startRun(sessionId, { prompt: 'Start' });
+      const events = await Array.fromAsync(coordinator.subscribeRunStream(run.id, 0));
+      const updates = events.flatMap(({ event }) => event.type === 'message_update'
+        ? [[event.deltaType, event.delta]] : []);
+      expect(updates).toEqual([
+        ['reasoning_delta', 'Consider '], ['text_delta', 'Body'],
+        ['reasoning_delta', '[REDACTED] safely'], ['text_delta', ' answer'],
+      ]);
+      expect(events.find(({ event }) => event.type === 'message_end')?.event).toMatchObject({
+        message: { content: 'Body answer', reasoningContent: 'Consider [REDACTED] safely' },
+      });
+      expect(JSON.stringify(events)).not.toContain(key);
+      expect(coordinator.getRunDetail(run.id)).toMatchObject({ run: { finalAnswer: 'Body answer' }, events });
+    }, { chunks: [
+      { type: 'reasoning_delta', delta: 'Consider ' + key.slice(0, 6) },
+      { type: 'text_delta', delta: 'Body' },
+      { type: 'reasoning_delta', delta: key.slice(6) + ' safely' },
+      { type: 'text_delta', delta: ' answer' },
+      { type: 'done', stopReason: 'stop' },
+    ] }));
 });

@@ -107,6 +107,46 @@ describe('[F05_MULTI_TURN_INVESTIGATION] Pi-style agent loop', () => {
     assertBalanced(events);
   });
 
+  it('T3-04 carries complete reasoning through tools in the current user turn and omits older reasoning', async () => {
+    const events: AgentEvent[] = [];
+    const provider = createMockLLMProvider({ turns: [
+      { reasoning: 'Think 1', chunkSize: 3, toolCalls: [call('inspect', 'one')] },
+      { reasoning: 'Think 2', toolCalls: [call('inspect', 'two')] },
+      { reasoning: 'Synthesize', text: 'Answer' },
+    ] });
+    const history: AgentMessage[] = [
+      { role: 'user', id: 'msg_old_user', content: 'Old question', createdAt },
+      { role: 'assistant', id: 'msg_old_answer', content: 'Old answer', toolCalls: [],
+        reasoningContent: 'Old thought', createdAt },
+    ];
+    const state = await runAgentLoop(options(provider, events, {
+      initialMessages: history,
+      tools: [tool('inspect', async () => ({ content: 'OK', isError: false }))],
+    }));
+    expect(state).toMatchObject({ status: 'completed', step: 3 });
+    const [first, second, third] = provider.recordedRequests;
+    for (const request of [first, second, third]) {
+      const oldAnswer = request?.messages.find(({ content }) => content === 'Old answer');
+      expect(oldAnswer).toEqual({ role: 'assistant', content: 'Old answer' });
+    }
+    expect(second?.messages.filter((message) => message.role === 'assistant' && message.toolCalls?.length))
+      .toMatchObject([{ reasoningContent: 'Think 1', toolCalls: [call('inspect', 'one')] }]);
+    expect(third?.messages.filter((message) => message.role === 'assistant' && message.toolCalls?.length))
+      .toMatchObject([
+        { reasoningContent: 'Think 1', toolCalls: [call('inspect', 'one')] },
+        { reasoningContent: 'Think 2', toolCalls: [call('inspect', 'two')] },
+      ]);
+    const updates = events.filter((event) => event.type === 'message_update');
+    expect(updates.map(({ deltaType, delta }) => [deltaType, delta])).toEqual([
+      ['reasoning_delta', 'Thi'], ['reasoning_delta', 'nk '], ['reasoning_delta', '1'],
+      ['reasoning_delta', 'Think 2'], ['reasoning_delta', 'Synthesize'], ['text_delta', 'Answer'],
+    ]);
+    expect(events.filter((event) => event.type === 'message_end').map(({ message }) => message.reasoningContent))
+      .toEqual(['Think 1', 'Think 2', 'Synthesize']);
+    expect(events.at(-1)).toMatchObject({ finalAnswer: 'Answer' });
+    assertBalanced(events);
+  });
+
   it('continues past twelve steps by default and can still be stopped', async () => {
     const events: AgentEvent[] = [];
     const controller = new AbortController();

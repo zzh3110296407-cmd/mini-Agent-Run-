@@ -223,6 +223,22 @@ describe('[F05_MULTI_TURN_INVESTIGATION] session history and protocol-safe conte
     assertToolPairing(output);
   });
 
+  it('T3-05 budgets reasoning without changing the reasoning of a retained tool call', async () => {
+    const { input, fixedOverheadTokens, witness } = tightBudgetFixture();
+    const latest = input[1];
+    if (latest?.role !== 'assistant') throw new Error('Expected a tool-calling assistant.');
+    const reasoningContent = '核对。';
+    const thinking = { ...latest, reasoningContent };
+    expect(estimateMessagesTokens([thinking]) - estimateMessagesTokens([latest])).toBe(3);
+    const transform = createDebugContextTransform({
+      contextWindowTokens: 600, fixedOverheadTokens: fixedOverheadTokens - 3,
+    });
+    const result = await transform([input[0]!, thinking, input[2]!]);
+    expect(result).toEqual([witness[0], thinking, witness[2]]);
+    expect(estimateMessagesTokens(result) + fixedOverheadTokens - 3).toBe(420);
+    assertToolPairing(result);
+  });
+
   it('rejects invalid budgets and a latest tool structure that cannot fit without losing pairing', () => {
     for (const settings of [
       { contextWindowTokens: 0 }, { triggerRatio: 0.8 }, { hardCapRatio: 1 },

@@ -55,6 +55,21 @@ const idSchemas = [
 ] as const;
 
 describe('M1.1 public shared schemas', () => {
+  it('T3-01 round-trips optional assistant reasoning and distinguishes valid delta types', () => {
+    const thinking = { ...assistant, reasoningContent: 'Check the evidence.' };
+    expect(shared.AgentMessageSchema.parse(assistant)).toEqual(assistant);
+    expect(shared.AgentMessageSchema.parse(thinking)).toEqual(thinking);
+    expect(shared.AgentEventSchema.parse({ type: 'message_end', message: thinking })).toEqual({
+      type: 'message_end', message: thinking,
+    });
+    const base = { type: 'message_update', messageId, delta: 'Check ' };
+    for (const deltaType of ['text_delta', 'reasoning_delta', 'toolcall_delta']) {
+      const delta = { ...base, deltaType };
+      expect(shared.AgentEventSchema.parse(delta)).toEqual(delta);
+    }
+    expect(shared.AgentEventSchema.safeParse({ ...base, deltaType: 'invalid_delta' }).success).toBe(false);
+  });
+
   it('preserves health exports and exposes the runtime limits', () => {
     expect(shared.APP_NAME).toBe('mini-agent-run');
     expect(shared.MAX_INLINE_TOOL_OUTPUT_BYTES).toBe(6144);
