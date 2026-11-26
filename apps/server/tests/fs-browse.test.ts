@@ -216,6 +216,43 @@ describe('[F01_SAFE_PATH_BROWSE] safe trace paths and directory browsing', () =>
     }
   });
 
+  it.each(['default', 'allowlist'])('opens only the evaluation test traces in %s mode', async (mode) => {
+    const dataset = join(root, 'Database', 'offline-eval', 'TrajErrBench');
+    const testDir = join(dataset, 'test');
+    const answers = join(dataset, 'answers');
+    const otherTest = join(dataset, 'testing');
+    for (const directory of [testDir, answers, otherTest]) fs.mkdirSync(directory, { recursive: true });
+    const trace = join(testDir, 'worker.jsonl');
+    fs.writeFileSync(trace, '{"step":1}');
+    fs.writeFileSync(join(answers, 'worker.jsonl'), '{"ground_truth":"protected"}');
+    const link = join(testDir, 'answer-link');
+    makeDirectoryLink(answers, link);
+    const server = mode === 'default' ? buildApp({ baseDir: fixture }) : app;
+    try {
+      const picked = await server.inject(browseUrl(trace) + '&resolveFile=1');
+      expect(picked.statusCode).toBe(200);
+      const browse = FsBrowseResponseSchema.parse(picked.json());
+      expect(browse).toMatchObject({ selectedFile: trace, currentPath: testDir });
+      expect(browse.entries.map(({ name }) => name)).toEqual(['worker.jsonl']);
+      expect((await server.inject(browseUrl(testDir))).statusCode).toBe(200);
+      for (const path of [dataset, answers, otherTest, join(link, 'worker.jsonl'), testDir + '/../answers/worker.jsonl']) {
+        const denied = await server.inject(browseUrl(path) + '&resolveFile=1');
+        expect(denied.statusCode).toBe(403);
+        expect(denied.json().error.code).toBe('PATH_FORBIDDEN');
+      }
+      const deniedSession = await server.inject({ method: 'POST', url: '/api/sessions', payload: { targetPath: answers } });
+      expect(deniedSession.statusCode).toBe(403);
+      const session = await server.inject({ method: 'POST', url: '/api/sessions', payload: { targetPath: trace } });
+      expect(session.statusCode).toBe(201);
+      expect(session.json()).toMatchObject({ pathType: 'file', targetPath: trace });
+      const body = await server.inject('/api/sessions/' + session.json().id + '/file-slice');
+      expect(body.statusCode).toBe(200);
+      expect(body.json().lines).toEqual([{ lineNumber: 1, level: 'other', text: '{"step":1}' }]);
+    } finally {
+      if (mode === 'default') await server.close();
+    }
+  });
+
   it('validates safe files and distinguishes missing paths from non-directories', async () => {
     const file = join(root, 'valid.json');
     fs.writeFileSync(file, '{}');

@@ -90,9 +90,11 @@ function isForbiddenSegment(segment: string) {
 }
 
 function isForbiddenPath(path: string) {
-  const segments = path.split(separators).filter((part) => part && part !== '.');
-  return segments.some((part, index) => isForbiddenSegment(part)
-    || (normalizeSegment(part) === 'offline-eval' && normalizeSegment(segments[index - 1] ?? '') === 'database'));
+  const segments = path.split(separators).filter((part) => part && part !== '.').map(normalizeSegment);
+  return segments.some((part, index) => isForbiddenSegment(part) || (
+    part === 'offline-eval' && segments[index - 1] === 'database'
+    && !(segments[index + 1] === 'trajerrbench' && segments[index + 2] === 'test')
+  ));
 }
 
 function fitsBrowseContract(path: string) {
