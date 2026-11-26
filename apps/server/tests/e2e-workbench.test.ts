@@ -1,3 +1,4 @@
+import { createOpenAICompatibleProvider } from '@mini-agent-run/ai';
 import {
   ArtifactMetaSchema, FsBrowseResponseSchema, InvestigationRunSchema, MAX_INLINE_TOOL_OUTPUT_BYTES,
   RunEventEnvelopeSchema, SessionDetailSchema, SessionListItemSchema, SessionSchema, TextSliceResponseSchema,
@@ -28,6 +29,78 @@ const artifactDetail = ArtifactMetaSchema.pick({}).extend({ artifact: ArtifactMe
 const sessionList = SessionSchema.pick({}).extend({ sessions: SessionListItemSchema.array() });
 
 describe('F12_E2E_VERIFICATION_SUITE real HTTP and disk SQLite', () => {
+  it('M5.3 replays the complete DeepSeek thinking sequence over HTTP after a tool call', async () => {
+    const thought = 'Read the trace before answering.';
+    const callId = 'tc_read_fixture';
+    const sliceId = 'tc_slice_fixture';
+    let requests = 0;
+    const provider = createOpenAICompatibleProvider({
+      baseUrl: 'https://api.deepseek.com', apiKey: 'offline-fixture',
+      fetchImpl: async (_url, init) => {
+        const request = JSON.parse(String(init?.body)) as {
+          thinking: { type: string }; messages: {
+            role: string; content: string; reasoning_content?: string; tool_calls?: { id: string }[]; tool_call_id?: string;
+          }[];
+        };
+        if (request.thinking?.type !== 'enabled') return new Response(null, { status: 400 });
+        const encode = (delta: object, finish_reason: string | null = null) => 'data: ' + JSON.stringify({
+          choices: [{ delta, finish_reason }],
+        }) + '\n\n';
+        const requestIndex = requests++;
+        if (requestIndex === 0) {
+          return new Response(encode({ reasoning_content: '', tool_calls: [{
+            index: 0, id: callId, function: { name: 'inspect_trace', arguments: '{"file":"agent-run-failed.jsonl"}' },
+          }] }, 'tool_calls') + 'data: [DONE]\n\n');
+        }
+        const assistants = request.messages.filter(({ role }) => role === 'assistant');
+        const [first, second] = assistants;
+        const result = request.messages.find(({ role }) => role === 'tool');
+        if (first?.reasoning_content !== '' || first.tool_calls?.[0]?.id !== callId
+          || result?.tool_call_id !== callId || !result.content.includes('"stepCount":30')) {
+          return new Response(null, { status: 400 });
+        }
+        if (requestIndex === 1) {
+          return new Response(encode({ reasoning_content: thought.slice(0, 10) })
+            + encode({ reasoning_content: thought.slice(10), tool_calls: [{
+              index: 0, id: sliceId, function: { name: 'read_file_slice',
+                arguments: '{"file":"agent-run-failed.jsonl","startLine":1,"limit":1}' },
+            }] }, 'tool_calls') + 'data: [DONE]\n\n');
+        }
+        if (second?.reasoning_content !== thought || second.tool_calls?.[0]?.id !== sliceId
+          || !request.messages.some(({ tool_call_id, content }) => tool_call_id === sliceId && content.includes('"lineNumber":1'))) {
+          return new Response(null, { status: 400 });
+        }
+        return new Response(encode({ reasoning_content: 'The trace is available.' })
+          + encode({ content: 'Inspected the trace.' }, 'stop') + 'data: [DONE]\n\n');
+      },
+    });
+    const workbench = await openOfflineWorkbench(WORKSPACE_ROOT, { provider, startServer });
+    try {
+      const session = SessionSchema.parse(await workbench.request('/api/sessions', 'POST', { targetPath: diagnosticPath }, 201));
+      const run = InvestigationRunSchema.parse(await workbench.request(sessionUrl(session.id) + '/runs', 'POST', {
+        prompt: 'Inspect the trace.',
+      }, 201));
+      expect(run.maxSteps).toBeNull();
+      const frames: RunEventEnvelope[] = await Array.fromAsync(workbench.stream(run.id));
+      const channel = (type: 'reasoning_delta' | 'text_delta') => frames.flatMap(({ event }) =>
+        event.type === 'message_update' && event.deltaType === type ? [event.delta] : []).join('');
+      expect(channel('reasoning_delta')).toBe(thought + 'The trace is available.');
+      expect(channel('text_delta')).toBe('Inspected the trace.');
+      expect(frames.filter(({ event }) => event.type === 'message_end').map(({ event }) => event)).toMatchObject([
+        { message: { role: 'assistant' } },
+        { message: { reasoningContent: thought } },
+        { message: { reasoningContent: 'The trace is available.' } },
+      ]);
+      expect(frames.find(({ event }) => event.type === 'message_end')?.event).not.toHaveProperty('message.reasoningContent');
+      expect(frames.at(-1)?.event).toMatchObject({ type: 'agent_end', status: 'completed', finalAnswer: 'Inspected the trace.' });
+      expect(runDetail.parse(await workbench.request(runUrl(run.id))).events).toEqual(frames);
+      expect(await Array.fromAsync(workbench.stream(run.id, frames[2]!.seq))).toEqual(frames.slice(3));
+      expect(requests).toBe(3);
+    } finally {
+      await workbench.close();
+    }
+  });
+
   it('E2E-01 through E2E-05 completes the offline investigation, interruption, recovery and deletion chain', async () => {
     const training = existsSync(trainingDir);
     const original = readFileSync(filePath);

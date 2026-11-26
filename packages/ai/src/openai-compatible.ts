@@ -24,13 +24,15 @@ export function resolveChatCompletionsUrl(baseUrl: string): string {
   return url.href;
 }
 
-function toWireMessage(message: LLMMessage) {
+function toWireMessage(message: LLMMessage, requireReasoning: boolean) {
   const { role, content } = message;
   if (role === 'tool') return { role, content, tool_call_id: message.toolCallId };
   if (role === 'assistant') {
+    // DeepSeek can call tools without emitting reasoning text, but still requires the field on replay.
+    const reasoning = message.reasoningContent ?? (requireReasoning ? '' : undefined);
     return {
       role, content,
-      ...(message.reasoningContent === undefined ? {} : { reasoning_content: message.reasoningContent }),
+      ...(reasoning === undefined ? {} : { reasoning_content: reasoning }),
       ...(message.toolCalls?.length ? { tool_calls: message.toolCalls.map(({ id, name, arguments: args }) => ({
         id, type: 'function', function: { name, arguments: JSON.stringify(args) },
       })) } : {}),
@@ -221,7 +223,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       try {
         const deepSeek = new URL(this.#endpoint).origin === 'https://api.deepseek.com';
         body = JSON.stringify({
-          model, messages: messages.map(toWireMessage),
+          model, messages: messages.map((message) => toWireMessage(message, deepSeek && Boolean(tools?.length))),
           ...(tools?.length ? { tools: tools.map((tool) => ({ type: 'function', function: tool })) } : {}),
           ...(deepSeek ? { thinking: { type: 'enabled' } } : {}),
           stream: true,
