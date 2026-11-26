@@ -150,8 +150,18 @@ function structuredFailureField(row: TraceObject) {
   return result?.failed ? result.field : undefined;
 }
 
-const toolFailurePrefix = /^\s*\[?(?:ERROR|FATAL|CRITICAL|EXCEPTION|TRACEBACK)\b/i;
-const nonzeroCommandExit = /(?:^|\r?\n)[ \t]*\[Command finished with exit code -?[1-9]\d*\]$/i;
+const toolLogTimestamp = String.raw`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?`;
+const toolFailureLine = new RegExp(
+  String.raw`^[ \t]*(?:(?:${toolLogTimestamp}|\[${toolLogTimestamp}\])[ \t]+)?\[?${strongError.source}`, 'im',
+);
+const commandExitFooter = /(?:^|\r?\n)[ \t]*\[Command finished with exit code (-?\d+)\]$/i;
+
+function hasToolFailureText(body: string) {
+  const exitCode = commandExitFooter.exec(body.trimEnd())?.[1];
+  // Successful commands can return lines from an error log as their output.
+  if (exitCode !== undefined) return Number(exitCode) !== 0 && strongError.test(body);
+  return toolFailureLine.test(body);
+}
 
 function errorEvidencePath(row: TraceObject): JsonPath | undefined {
   const toolMessage = isToolMessage(row);
@@ -177,9 +187,7 @@ function errorEvidencePath(row: TraceObject): JsonPath | undefined {
         }
       }
       if (!payload) {
-        if (toolFailurePrefix.test(body) || (nonzeroCommandExit.test(body.trimEnd()) && strongError.test(body))) {
-          textFailure ??= [bodyField];
-        }
+        if (hasToolFailureText(body)) textFailure ??= [bodyField];
         continue;
       }
     }

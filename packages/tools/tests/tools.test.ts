@@ -351,6 +351,37 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     expect(raw.split('\n').filter((line, index) => classify(line, index + 1) === 'error')).toEqual([]);
   });
 
+  it.each([
+    ['ISO timestamp', '2026-11-26T04:00:00Z ERROR: Inventory service unavailable', {}, true],
+    ['second line', 'Request req-42\nERROR: Inventory service unavailable', {}, true],
+    ['CRLF and bracketed timestamp', 'Request req-42\r\n  [2026-11-26 12:00:00.125+0800] [ERROR] Inventory unavailable', {}, true],
+    ['timestamped informational note', '2026-11-26T04:00:00Z INFO: Checked prior ERROR records', {}, false],
+    ['explicit success', 'Request req-42\nERROR: Archived entry', { isError: false }, false],
+    ['successful search result', 'Archived entries:\n2026-11-26T04:00:00Z ERROR: Inventory unavailable',
+      { content: { status: 'ok', matched: 1 } }, false],
+  ] as const)('M5.3-03 R2d classifies sibling messages with %s at their original JSON line', async (_, message, fields, failed) => {
+    const file = 'inventory.json';
+    const raw = JSON.stringify({ runs: [{ messages: [
+      { role: 'assistant', tool_calls: [{ id: 'inventory', name: 'check_stock', arguments: {} }] },
+      { role: 'tool', tool_call_id: 'inventory', name: 'check_stock',
+        content: { requestId: 'req-42' }, message, ...fields },
+    ] }] }, null, 2).replaceAll('\n', '\r\n');
+    const { call } = build({ [file]: raw });
+    const result = await call('inspect_trace', { file });
+    expect(result.isError).toBe(false);
+    const lines = raw.split('\r\n');
+    const line = lines.findIndex((value) => value.trimStart().startsWith('"message":')) + 1;
+    expect(line).toBeGreaterThan(0);
+    expect(result.data).toMatchObject({
+      threeState: { hasToolError: failed, toolErrorCount: Number(failed) },
+      toolCalls: [{ step: 0, toolName: 'check_stock', isError: failed }],
+      anomalies: { firstError: failed ? { step: 1, line, snippet: lines[line - 1]?.trim() } : null },
+    });
+    const classify = createTraceLineClassifier(raw);
+    expect(lines.flatMap((value, index) => classify(value, index + 1) === 'error' ? [index + 1] : []))
+      .toEqual(failed ? [line] : []);
+  });
+
   it('keeps command failures with a nonzero exit footer distinct from successful output excerpts', async () => {
     const diagnostics = [
       'Starting test runner\nERROR: target not found',
