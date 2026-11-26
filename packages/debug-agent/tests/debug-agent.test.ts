@@ -299,6 +299,17 @@ describe('[F05_MULTI_TURN_INVESTIGATION] debug prompt and tolerant conclusion ex
       .toBe(buildDebugSystemPrompt());
   });
 
+  it('T3-09 instructs the agent to verify soft failures against raw evidence before stopping', () => {
+    const prompt = buildDebugSystemPrompt();
+    for (const phrase of [
+      'hasToolError: false or firstError: null', 'logic, arithmetic, policy violations', 'evaluation summaries alone',
+      'read_file_slice startLine', 'successive startStep/endStep ranges', 'Follow nextStep',
+      'the task constraints and rules', 'the agent’s stated numbers and actions', 'the actual tool arguments and results',
+      'the first step and original line', 'There is no default step limit', 'Never ask the user to retrace a step',
+    ]) expect(prompt).toContain(phrase);
+    expect(prompt).not.toMatch(/airline|retail|sierra/i);
+  });
+
   it('extracts all evidence types from a case-insensitive tilde fence and cleans only that block', () => {
     const selected = fence(JSON.stringify(exampleConclusion), '  INVESTIGATION-CONCLUSION  ', '~~~', '\r\n');
     const example = fence('{"foo":1}', 'json', backticks, '\r\n');
@@ -401,11 +412,11 @@ function sliceContent(content: string, { offsetLine, limit, level, q }: Paramete
   };
 }
 
-function debugFixture() {
+function debugFixture(source?: { file: string; content: string }) {
   const targetPath = 'D:\\private\\case-data';
-  const file = 'trace.log';
-  const content = Array.from({ length: 64 }, (_, index) => 'INFO Request ' + index + ' ' + 'diagnostic detail '.repeat(10))
-    .join('\n') + '\nERROR root cause: missing lookup argument';
+  const file = source?.file ?? 'trace.log';
+  const content = source?.content ?? (Array.from({ length: 64 }, (_, index) =>
+    'INFO Request ' + index + ' ' + 'diagnostic detail '.repeat(10)).join('\n') + '\nERROR root cause: missing lookup argument');
   const workspace: TraceWorkspacePort = {
     binding: { targetPath, pathType: 'dir' },
     resolveTarget: () => ({ realPath: targetPath, kind: 'dir' }),
@@ -653,6 +664,58 @@ describe('[F05_MULTI_TURN_INVESTIGATION] offline debug investigations', () => {
       { role: 'user', content: input.prompt }, { role: 'assistant', content: result.finalAnswer },
       { role: 'user', content: 'How can it be prevented?' },
     ]);
+  });
+
+  it('T3-09 completes a fifteen-step nested soft-failure investigation using the actual tool evidence', async () => {
+    const file = 'calculation.json';
+    const messages = Array.from({ length: 12 }, (_, turn_idx) => ({
+      turn_idx,
+      ...(turn_idx === 10 ? { role: 'assistant', content: 'Total charge is 30.', tool_calls: [
+        { id: 'action', function: { name: 'apply_charge', arguments: { count: 3, unitPrice: 30 } } },
+      ] } : turn_idx === 11 ? { role: 'tool', id: 'action', error: false, content: '{"total":90,"applied":true}' }
+        : { role: 'user', content: 'Continue checking the request.' }),
+    }));
+    const source = JSON.stringify({
+      taskSummary: 'Reconcile quantity times unit price before confirming.',
+      runs: [{ terminationReason: 'completed', reward: 0, messages }],
+    }, null, 2);
+    const { input, tools } = debugFixture({ file, content: source });
+    const provider = createMockLLMProvider({ turns(request, index) {
+      if (index === 0) return { toolCalls: [call('list', 'list_files'), call('inspect', 'inspect_trace', { file })] };
+      if (index === 1) {
+        const inspection = request.messages.find((message) => message.role === 'tool' && message.toolCallId === 'tc_inspect');
+        expect(JSON.parse(inspection?.content ?? '')).toMatchObject({
+          stepCount: 12, threeState: { hasToolError: false, taskOutcome: 'failed' },
+        });
+        return { toolCalls: [call('rules', 'read_file_slice', { file, startLine: 1, limit: 2 })] };
+      }
+      if (index < 14) {
+        const step = index - 2;
+        return { toolCalls: [call('step_' + step, 'read_file_slice', { file, startStep: step, endStep: step })] };
+      }
+      const result = (id: string) => request.messages.find((message) => message.role === 'tool' && message.toolCallId === id)?.content;
+      expect(result('tc_rules')).toContain('Reconcile quantity times unit price');
+      const inspected = messages.map((_, step) => JSON.parse(result('tc_step_' + step) ?? '').steps[0]);
+      expect(inspected.map(({ step }: { step: number }) => step)).toEqual(messages.map(({ turn_idx }) => turn_idx));
+      const { count, unitPrice } = inspected[10].value.tool_calls[0].function.arguments;
+      const claimed = Number(inspected[10].value.content.match(/\d+/u)?.[0]);
+      const { total } = JSON.parse(inspected[11].value.content);
+      expect(count * unitPrice).toBe(total);
+      expect(claimed).toBeLessThan(total);
+      const evidence = inspected[10];
+      const answer = 'The charge was ' + total + ', but the agent reported ' + claimed + ' by omitting the quantity.';
+      return { reasoning: 'Reconcile the claim and charged amount.', text: answer + '\n\n' + conclusionFence({
+        summary: answer, rootCauseStep: evidence.step, rootCauseCategory: 'arithmetic',
+        threeStateAssessment: { terminationReason: 'completed', hasToolError: false, taskOutcome: 'failed' },
+        evidence: [{ kind: 'file_line', label: 'Incorrect total', file, startLine: evidence.line }], recommendations: [],
+      }) };
+    } });
+    const result = await runDebugInvestigation({ ...input, tools, provider, model: 'fixture' });
+    expect(result.state).toMatchObject({ status: 'completed', maxSteps: null, step: 15 });
+    expect(result.finalAnswer).toBe('The charge was 90, but the agent reported 30 by omitting the quantity.');
+    const line = source.split('\n').findIndex((value) => value.includes('"turn_idx": 10'));
+    expect(result.conclusion).toMatchObject({ rootCauseStep: 10, evidence: [{ file, startLine: line }] });
+    expect(provider.recordedRequests).toHaveLength(15);
   });
 
   it('applies a custom context transform before the hard cap and counts system and tool overhead', async () => {

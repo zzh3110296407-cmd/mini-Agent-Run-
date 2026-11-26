@@ -143,14 +143,15 @@ export function createToolRegistry(options: ToolRegistryOptions): readonly Agent
       }));
       return { files, total: files.length, truncated };
     }),
-    defineTool(workspace, 'inspect_trace', 'Inspect a trace and identify errors, retries, and slow operations.', {
+    defineTool(workspace, 'inspect_trace', 'Inspect trace structure, step count, tool calls, termination, outcome and runtime anomalies. No runtime error does not rule out a semantic failure.', {
       file,
     }, async ({ file }, ctx) => {
       const input = await workspace.readFile(file, ctx.allowedRoots);
       checkAbort(ctx.signal);
-      return analyzeTraceDetails(input.relativePath, input.content).overview;
+      const { overview, toolCalls } = analyzeTraceDetails(input.relativePath, input.content);
+      return { ...overview, toolCalls };
     }),
-    defineTool(workspace, 'read_file_slice', 'Read sanitized trace lines or steps with their original positions.', {
+    defineTool(workspace, 'read_file_slice', 'Use startStep and endStep for compact conversation and tool steps with original line numbers. Use startLine and limit for original sanitized lines, such as task instructions and rules.', {
       ...lineFields, startStep: integer(0), endStep: integer(0),
     }, async (args, ctx) => {
       if (args.startStep !== undefined && args.endStep !== undefined && args.startStep > args.endStep) invalidArguments();

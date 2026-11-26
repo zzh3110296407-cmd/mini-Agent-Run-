@@ -45,6 +45,13 @@ export function boundedLinePage(
   return pack(lines, pageNext);
 }
 
+const stepTelemetry = new Set(['raw_data', 'usage', 'token_usage', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'cost']);
+
+export function compactStepRecord(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !stepTelemetry.has(key)));
+}
+
 type Step = { step: number; line: number; value: unknown };
 
 export function boundedSteps(file: string, records: readonly Step[]) {
@@ -53,7 +60,8 @@ export function boundedSteps(file: string, records: readonly Step[]) {
   const pack = (values: Step[], nextStep: number | null, stepTruncated = false) => ({
     file: displayFile, steps: values, hasMore: nextStep !== null, nextStep, ...(stepTruncated ? { stepTruncated: true } : {}),
   });
-  for (const [index, record] of records.entries()) {
+  for (const [index, entry] of records.entries()) {
+    const record = { ...entry, value: compactStepRecord(entry.value) };
     const next = records[index + 1]?.step ?? null;
     const candidate = [...steps, record];
     if (fitting(pack(candidate, next))) {

@@ -2,7 +2,7 @@ import type { ArtifactStorePort, ToolExecutionContext, TraceWorkspacePort } from
 import {
   AgentMessageSchema, ArtifactMetaSchema, TextSliceResponseSchema, TraceOverviewSchema, type TextSliceResponse,
 } from '@mini-agent-run/shared';
-import { analyzeTraceContent, createToolRegistry, sanitizeTraceContent, truncateUtf8Safe } from '@mini-agent-run/tools';
+import { analyzeTraceContent, createToolRegistry, createTraceLineClassifier, sanitizeTraceContent, truncateUtf8Safe } from '@mini-agent-run/tools';
 import fc from 'fast-check';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { describe, expect, it, vi } from 'vitest';
@@ -138,6 +138,92 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     });
     expect(await overview('trace.log')).toMatchObject({
       format: 'plain_text', anomalies: { firstError: { line: 2 }, slowSpans: [{ durationMs: 2250 }] },
+    });
+  });
+
+  it('T3-07/T3-08 follows nested trajectories, preserves raw coordinates and compacts only step records', async () => {
+    const action = { id: 'first', function: { name: 'lookup', arguments: { usage: 'semantic input' } } };
+    const update = { id: 'second', name: 'update', arguments: { cost: 50 } };
+    const payload = { error: false, cost: 50, status: 'applied', proof: { ground_truth: 'private-result' } };
+    const messages = Array.from({ length: 24 }, (_, turn_idx) => ({
+      turn_idx,
+      ...(turn_idx === 2 ? { role: 'assistant', content: '', tool_calls: [action, update] }
+        : turn_idx === 3 ? { role: 'tool', id: 'first', error: true, content: 'Unavailable' }
+          : turn_idx === 4 ? { role: 'tool', id: 'second', content: payload, isError: false }
+            : { role: 'user', content: 'Evidence 🙂 ' + turn_idx }),
+      raw_data: { duplicate: 'r'.repeat(500), diagnostic: { extra: { annotation: 'private-raw' } } },
+      usage: { tokens: 500 }, token_usage: 1, prompt_tokens: 2, completion_tokens: 3, total_tokens: 5, cost: 1,
+    }));
+    const document = {
+      tasks: [{ description: { purpose: 'Verify an update against its limits' } }],
+      simulations: [
+        { reward_info: { reward: 0 }, termination_reason: 'user_stop', messages,
+          secret: { critical_error_step: 3, nested: { critical_error_type: 'private-marker' } } },
+        { messages: [{ turn_idx: 100, content: 'Second run' }] },
+      ],
+    };
+    const file = 'nested.json';
+    const raw = JSON.stringify(document, null, 2).replaceAll('\n', '\r\n');
+    const lines = raw.split('\r\n');
+    const lineOf = (turn: number) => lines.findIndex((line) => line.trim() === '"turn_idx": ' + turn + ',');
+    const errorLine = lines.findIndex((line) => line.trim() === '"error": true,') + 1;
+    const { call } = build({ [file]: raw });
+    const inspected = await call('inspect_trace', { file });
+    expect(inspected.isError).toBe(false);
+    expect(inspected.data).toMatchObject({
+      stepCount: 24, taskSummary: 'Verify an update against its limits',
+      threeState: { taskOutcome: 'failed', terminationReason: 'user_stop', toolErrorCount: 1 },
+      anomalies: { firstError: { step: 3, line: errorLine } },
+      toolCalls: [{ step: 2, toolName: 'lookup', isError: true }, { step: 2, toolName: 'update', isError: false }],
+    });
+    const classify = createTraceLineClassifier(raw);
+    expect(classify(lines[errorLine - 1]!, errorLine)).toBe('error');
+    expect(classify(lines[lineOf(3) - 1]!, lineOf(3))).toBe('other');
+
+    const compact = await call('read_file_slice', { file, startStep: 0, endStep: 23 });
+    expect(compact.isError).toBe(false);
+    expect(Buffer.byteLength(compact.content)).toBeLessThanOrEqual(charLimit);
+    expect(compact.data).toMatchObject({ hasMore: false, nextStep: null });
+    expect(compact.data.steps.map(({ step, line }: { step: number; line: number }) => [step, line]))
+      .toEqual(messages.map(({ turn_idx }) => [turn_idx, lineOf(turn_idx)]));
+    expect(compact.data.steps[2].value).toEqual({ turn_idx: 2, role: 'assistant', content: '', tool_calls: [action, update] });
+    expect(compact.data.steps[3].value).toEqual({ turn_idx: 3, role: 'tool', id: 'first', error: true, content: 'Unavailable' });
+    expect(compact.data.steps[4].value).toEqual({
+      turn_idx: 4, role: 'tool', id: 'second', content: { error: false, cost: 50, status: 'applied', proof: {} }, isError: false,
+    });
+    const telemetry = lines.findIndex((line) => line.includes('"raw_data"')) + 1;
+    const original = await call('read_file_slice', { file, startLine: telemetry, limit: 2 });
+    expect(original.data.lines.map(({ text }: { text: string }) => text)).toEqual(lines.slice(telemetry - 1, telemetry + 1));
+    expect(original.content).toContain('raw_data');
+    const sanitized = sanitizeTraceContent(raw, file);
+    if (!sanitized.ok) throw new Error('Expected sanitized trace.');
+    expect(sanitized.sanitized.split('\r\n')).toHaveLength(lines.length);
+    for (const output of [sanitized.sanitized, inspected.content, compact.content, original.content]) {
+      expect(output).not.toMatch(/annotation|ground_truth|critical_error|private-/);
+    }
+  });
+
+  it.each([
+    ['top-level turns', { turns: [{ stepNumber: 10 }, { step_number: 11 }] }, [10, 11]],
+    ['top-level precedence', { history: [{ index: 7 }], runs: [{ messages: [{ step: 9 }] }] }, [7]],
+    ['nested trajectory', { runs: [{ trajectory: [{ turn: 4 }, { index: 5 }, {}] }] }, [2, 4, 5]],
+    ['nested events', { episodes: [{ events: [{ event: { step: 8 } }] }] }, [8]],
+  ] as const)('selects %s using the supported keys and step aliases', async (_, document, expected) => {
+    const file = 'trace.json';
+    const { call } = build({ [file]: JSON.stringify(document, null, 2) });
+    const data = (await call('read_file_slice', { file, startStep: 0 })).data;
+    expect(data.steps.map(({ step }: { step: number }) => step)).toEqual(expected);
+  });
+
+  it('prefers explicit trace metadata to a nested run fallback', () => {
+    const doc = JSON.stringify({
+      terminationReason: 'external_stop', taskOutcome: 'passed', taskSummary: 'Top-level summary',
+      tasks: [{ instruction: 'Nested instructions' }],
+      trials: [{ terminationReason: 'user_stop', reward_info: { reward: 0 }, history: [{ status: 'failed' }] }],
+    });
+    expect(analyzeTraceContent('trace.json', doc)).toMatchObject({
+      stepCount: 1, taskSummary: 'Top-level summary',
+      threeState: { terminationReason: 'external_stop', taskOutcome: 'passed', hasToolError: false },
     });
   });
 

@@ -1,5 +1,7 @@
 import { TraceOverviewSchema, type LogLevel, type TraceOverview } from '@mini-agent-run/shared';
-import { sanitizeTraceContent, traceValueOffset, traceLines, type JsonPath, type RecordLocation } from './sanitize.js';
+import {
+  asObject, locateTraceStructure, sanitizeTraceContent, traceValueOffset, traceLines, type JsonPath, type RecordLocation,
+} from './sanitize.js';
 import { ToolError } from './tool-error.js';
 
 type TraceObject = Record<string, unknown>;
@@ -13,9 +15,7 @@ export interface TraceAnalysisDetails {
   toolCalls: Call[];
 }
 
-export function asObject(value: unknown): TraceObject | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as TraceObject : undefined;
-}
+export { asObject } from './sanitize.js';
 
 function text(value: unknown) {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
@@ -39,8 +39,8 @@ function sourceRecords(trace: Sanitized): { values: unknown[]; locations: Record
   const root = asObject(trace.parsedJson);
   const location = trace.locations;
   if (trace.parsedLines) return { values: trace.parsedLines, locations: location?.records ?? [] };
-  if (Array.isArray(root?.messages)) return { values: root.messages, locations: location?.messages ?? [] };
-  if (Array.isArray(root?.steps)) return { values: root.steps, locations: location?.steps ?? [] };
+  const { trajectory } = locateTraceStructure(root);
+  if (trajectory) return { values: trajectory.values, locations: location?.trajectory ?? [] };
   if (Array.isArray(trace.parsedJson)) return { values: trace.parsedJson, locations: location?.records ?? [] };
   if (root) return { values: [root], locations: location?.document ? [location.document] : [] };
   return { values: [], locations: [] };
@@ -54,7 +54,8 @@ function indexedRecords(trace: Sanitized) {
     const row = rowData(value);
     const span = locations[index];
     while (current && span && current.end < span.start) current = lines.next().value;
-    const step = nonnegative(row?.step) ?? nonnegative(row?.stepNumber) ?? nonnegative(row?.step_number) ?? index;
+    const step = nonnegative(row?.step) ?? nonnegative(row?.stepNumber) ?? nonnegative(row?.step_number)
+      ?? nonnegative(row?.turn_idx) ?? nonnegative(row?.turn) ?? nonnegative(row?.index) ?? index;
     const record: TraceRecord = { value, step, line: span?.line ?? current?.line ?? 1 };
     return { row, span, record };
   });
@@ -95,6 +96,10 @@ function asOutcome(value: unknown): Outcome | undefined {
 function findOutcome(row: TraceObject | undefined, allowStatus: boolean) {
   const keys = ['taskOutcome', 'task_outcome', 'outcome', 'passed', 'success', ...(allowStatus ? ['status'] : [])];
   return keys.map((key) => asOutcome(row?.[key])).find((value) => value !== undefined);
+}
+
+function rewardOutcome(value: unknown): Outcome | undefined {
+  return value === 1 ? 'passed' : value === 0 ? 'failed' : undefined;
 }
 
 function reason(row: TraceObject | undefined) {
@@ -277,12 +282,16 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
   const slowSpans: TraceOverview['anomalies']['slowSpans'] = [];
   let firstError: TraceOverview['anomalies']['firstError'] = null;
   let unmatchedErrors = 0;
-  const declaredRunReason = reason(root) ?? reason(metadata);
+  const { primaryRun } = locateTraceStructure(root);
+  const primaryTask = Array.isArray(root?.tasks) ? asObject(root.tasks[0]) : undefined;
+  const declaredRunReason = reason(root) ?? reason(metadata) ?? reason(primaryRun);
   let runEndReason: string | undefined;
   let observedReason: string | undefined;
-  const reward = metadata?.reward;
-  let taskOutcome: Outcome | undefined = reward === 1 ? 'passed' : reward === 0 ? 'failed'
-    : findOutcome(metadata, true) ?? findOutcome(root, true);
+  const declaredOutcome = [
+    findOutcome(root, true), rewardOutcome(metadata?.reward), findOutcome(metadata, true),
+    rewardOutcome(asObject(primaryRun?.reward_info)?.reward), rewardOutcome(primaryRun?.reward), findOutcome(primaryRun, true),
+  ].find((outcome) => outcome !== undefined && outcome !== 'unknown');
+  let taskOutcome: Outcome | undefined = declaredOutcome;
   const records = indexedRecords(trace);
 
   for (const { row, span, record } of records) {
@@ -291,7 +300,8 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
     const bodyField = ['content', 'text', 'message'].find((key) => text(row[key]) !== undefined);
     const body = bodyField === undefined ? '' : text(row[bodyField]) ?? '';
     const name = callName(row);
-    const id = firstText(row, ['toolCallId', 'tool_call_id', 'callId']);
+    const id = firstText(row, ['toolCallId', 'tool_call_id', 'callId'])
+      ?? (isToolMessage(row) ? text(row.id) : undefined);
     const eventType = firstText(row, ['type', 'event_type', 'eventType']);
     const evidenceField = errorEvidenceField(row, body, bodyField);
     const failed = evidenceField !== undefined;
@@ -356,7 +366,7 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
     } else if (name === 'transfer_to_human_agents' || namedCalls.some((call) => call.name === 'transfer_to_human_agents')) {
       observedReason ??= 'transfer_to_human_agents';
     }
-    if (reward !== 0 && reward !== 1) {
+    if (declaredOutcome === undefined) {
       const outcome = findOutcome(row, terminalEvent || (!name && !eventType));
       taskOutcome = outcome ?? taskOutcome;
     }
@@ -383,7 +393,9 @@ export function analyzeTraceDetails(relativePath: string, content: string): Trac
     file: relativePath, format, byteSize: Buffer.byteLength(content), lineCount,
     stepCount: format === 'plain_text' ? null : records.length,
     taskSummary: firstText(metadata, ['task_description', 'taskSummary', 'task_summary'])
-      ?? firstText(root, ['taskSummary', 'task_summary', 'task_description']) ?? null,
+      ?? firstText(root, ['taskSummary', 'task_summary', 'task_description'])
+      ?? text(asObject(primaryTask?.description)?.purpose)
+      ?? firstText(primaryTask, ['task_description', 'instruction']) ?? null,
     threeState: {
       terminationReason: declaredRunReason ?? runEndReason ?? observedReason ?? null,
       hasToolError: toolErrorCount > 0, toolErrorCount, taskOutcome: taskOutcome ?? 'unknown',

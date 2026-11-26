@@ -1,4 +1,6 @@
 const forbiddenKeys = new Set(['annotation', 'critical_error_step', 'critical_error_type', 'ground_truth']);
+const trajectoryKeys = ['messages', 'steps', 'turns', 'trajectory', 'events', 'history'] as const;
+const containerKeys = ['simulations', 'runs', 'trials', 'episodes', 'sessions', 'traces'] as const;
 const failure = {
   ok: false, code: 'UNSANITIZABLE_TRACE_JSON', message: 'Structured trace content could not be sanitized.',
 } as const;
@@ -11,6 +13,32 @@ export interface RecordLocation {
 
 export type JsonPath = readonly (string | number)[];
 
+export function asObject(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function findTrajectory(object: Record<string, unknown> | undefined, path: JsonPath = []) {
+  for (const key of trajectoryKeys) {
+    const values = object?.[key];
+    if (Array.isArray(values)) return { values: values as unknown[], path: [...path, key] };
+  }
+}
+
+export function locateTraceStructure(value: unknown) {
+  const root = asObject(value);
+  const top = findTrajectory(root);
+  let primaryRun: Record<string, unknown> | undefined;
+  for (const key of containerKeys) {
+    const container = root?.[key];
+    const run = Array.isArray(container) ? asObject(container[0]) : undefined;
+    if (!run) continue;
+    primaryRun ??= run;
+    const nested = findTrajectory(run, [key, 0]);
+    if (nested) return { trajectory: top ?? nested, primaryRun: run };
+  }
+  return { trajectory: top, primaryRun };
+}
+
 interface Sanitized {
   ok: true;
   sanitized: string;
@@ -22,11 +50,13 @@ interface Sanitized {
     records?: RecordLocation[];
     messages?: RecordLocation[];
     steps?: RecordLocation[];
+    trajectory?: RecordLocation[];
   };
 }
 
 function scrubDocument(source: string, evidencePath?: JsonPath) {
   const parsed: unknown = JSON.parse(source);
+  const trajectoryPath = evidencePath === undefined ? locateTraceStructure(parsed).trajectory?.path : undefined;
   const masks: RecordLocation[] = [];
   const locations: NonNullable<Sanitized['locations']> = {};
   let position = 0;
@@ -45,7 +75,7 @@ function scrubDocument(source: string, evidencePath?: JsonPath) {
     }
   }
 
-  function scanValue(visible: boolean, records?: RecordLocation[], root = false, depth = -1) {
+  function scanValue(visible: boolean, records?: RecordLocation[], root = false, depth = -1, trajectoryDepth = -1) {
     skipSpace();
     const start = position;
     if (visible && depth === evidencePath?.length) evidenceOffset = start;
@@ -77,10 +107,15 @@ function scrubDocument(source: string, evidencePath?: JsonPath) {
           childRecords = source.charAt(position) === '[' ? [] : undefined;
           locations[key] = childRecords;
         }
+        const childTrajectoryDepth = trajectoryPath?.[trajectoryDepth] === key ? trajectoryDepth + 1 : -1;
+        if (childTrajectoryDepth === trajectoryPath?.length) {
+          childRecords ??= [];
+          locations.trajectory = childRecords;
+        }
         const childDepth = evidencePath?.[depth] === key ? depth + 1 : -1;
         // A later member replaces the previous subtree at the same decoded key.
         if (childDepth !== -1) evidenceOffset = undefined;
-        scanValue(visible && !remove, childRecords, false, childDepth);
+        scanValue(visible && !remove, childRecords, false, childDepth, childTrajectoryDepth);
         skipSpace();
         if (source.charAt(position) === ',') {
           previousComma = position++;
@@ -95,7 +130,8 @@ function scrubDocument(source: string, evidencePath?: JsonPath) {
       for (let index = 0; source.charAt(position) !== ']'; index++) {
         const itemStart = position;
         const childDepth = evidencePath?.[depth] === index ? depth + 1 : -1;
-        scanValue(visible, undefined, false, childDepth);
+        const childTrajectoryDepth = trajectoryPath?.[trajectoryDepth] === index ? trajectoryDepth + 1 : -1;
+        scanValue(visible, undefined, false, childDepth, childTrajectoryDepth);
         records?.push({ start: itemStart, end: position });
         skipSpace();
         if (source.charAt(position) === ',') {
@@ -114,7 +150,7 @@ function scrubDocument(source: string, evidencePath?: JsonPath) {
 
   // Scan source keys individually because JSON.parse collapses duplicate members.
   if (Array.isArray(parsed)) locations.records = [];
-  scanValue(true, locations.records, true, evidencePath ? 0 : -1);
+  scanValue(true, locations.records, true, evidencePath ? 0 : -1, trajectoryPath ? 0 : -1);
   if (masks.length === 0) return { parsed, text: source, stripped: false, locations, evidenceOffset };
   const chunks: string[] = [];
   let previous = 0;
