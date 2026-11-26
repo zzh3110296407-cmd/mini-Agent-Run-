@@ -1,9 +1,11 @@
 import type { TraceFileEntry, TraceListResult, TraceWorkspaceBinding } from '@mini-agent-run/agent';
-import { FsBrowseResponseSchema, type FsBrowseEntry, type FsBrowseResponse, type Session } from '@mini-agent-run/shared';
+import { COMPUTER_ROOT_PATH, FsBrowseResponseSchema, type FsBrowseEntry, type FsBrowseResponse,
+  type Session } from '@mini-agent-run/shared';
 import { closeSync, constants, fstatSync, lstatSync, openSync, opendirSync, readSync,
   readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isUnrestrictedTraceRoots } from '../config/env.js';
 
 export const WORKSPACE_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
 export const MAX_FILE_SLICE_BYTES = 20 * 1024 * 1024;
@@ -12,6 +14,7 @@ const windows = process.platform === 'win32';
 const separators = windows ? /[/\\]/ : '/';
 const maxPathLength = 4096;
 const traceExtensions = new Set(['.json', '.jsonl', '.log', '.txt']);
+const forbiddenSegments = new Set(['.env', '.git', '.npmrc', 'node_modules', '.ssh', '.aws', '.gnupg']);
 const errors = {
   INVALID_PATH: [400, 'The trace path is invalid.'],
   PATH_NOT_A_DIRECTORY: [400, 'The trace path is not a directory.'],
@@ -76,16 +79,20 @@ function isWithinRoot(candidate: string, root: string) {
   return candidateKey === rootKey || candidateKey.startsWith(rootKey.endsWith(sep) ? rootKey : rootKey + sep);
 }
 
-function isForbiddenSegment(segment: string) {
+function normalizeSegment(segment: string) {
   const lower = segment.toLowerCase();
-  const name = windows ? lower.replace(/:[\s\S]*$/, '').replace(/[. ]+$/, '') : lower;
-  return name === '.env' || name.startsWith('.env.') || name === '.git'
-    || name === '.npmrc' || name === 'node_modules';
+  return windows ? lower.replace(/:[\s\S]*$/, '').replace(/[. ]+$/, '') : lower;
 }
 
-function hasForbiddenSegment(path: string, roots: readonly string[]) {
-  return roots.some((root) => isWithinRoot(path, root)
-    && relative(root, path).split(separators).some(isForbiddenSegment));
+function isForbiddenSegment(segment: string) {
+  const name = normalizeSegment(segment);
+  return forbiddenSegments.has(name) || name.startsWith('.env.');
+}
+
+function isForbiddenPath(path: string) {
+  const segments = path.split(separators).filter((part) => part && part !== '.');
+  return segments.some((part, index) => isForbiddenSegment(part)
+    || (normalizeSegment(part) === 'offline-eval' && normalizeSegment(segments[index - 1] ?? '') === 'database'));
 }
 
 function fitsBrowseContract(path: string) {
@@ -93,6 +100,22 @@ function fitsBrowseContract(path: string) {
 }
 
 export function resolveAllowedRoots(rawRoots: readonly string[], baseDir = WORKSPACE_ROOT): string[] {
+  if (isUnrestrictedTraceRoots(rawRoots)) {
+    if (!windows) return ['/'];
+    const drives: string[] = [];
+    for (const letter of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+      const drive = letter + ':\\';
+      try {
+        if (!statSync(drive, { throwIfNoEntry: false })?.isDirectory()) continue;
+        opendirSync(drive).closeSync();
+        drives.push(drive);
+      } catch {
+        // Ignore unmounted drives and drives that cannot be opened.
+      }
+    }
+    if (drives.length === 0) throw new PathSandboxError('NO_ACCESSIBLE_ROOTS');
+    return drives;
+  }
   const roots = new Map<string, string>();
   for (const raw of rawRoots) {
     if (!raw.trim()) continue;
@@ -155,8 +178,7 @@ function enforcePathBoundary(
   candidate: string, lexical: string, input: string, roots: readonly string[], requiredRealPath?: string,
 ) {
   const root = matchRoot(candidate, roots);
-  if (input.split(separators).some(isForbiddenSegment)
-    || hasForbiddenSegment(lexical, roots) || hasForbiddenSegment(candidate, roots)) {
+  if ([input, lexical, candidate].some(isForbiddenPath)) {
     throw new PathSandboxError('PATH_FORBIDDEN');
   }
   if (requiredRealPath !== undefined && pathKey(candidate) !== pathKey(requiredRealPath)) {
@@ -215,6 +237,7 @@ function assertTraceExtension(inputPath: string, realPath: string) {
 export function resolveSessionTargetPath(
   inputPath: string, roots: readonly string[], baseDir = WORKSPACE_ROOT,
 ): ResolvedTracePath {
+  if (inputPath === COMPUTER_ROOT_PATH) throw new PathSandboxError('INVALID_PATH');
   const target = resolveSafeTracePath(inputPath, roots, baseDir);
   if (!fitsBrowseContract(target.realPath)) throw new PathSandboxError('INVALID_PATH');
   if (target.kind === 'file') assertTraceExtension(inputPath, target.realPath);
@@ -366,14 +389,41 @@ export function listSessionTraceFiles(
 
 export function browseSafeDirectory(
   inputPath: string | undefined, roots: readonly string[], baseDir = WORKSPACE_ROOT,
+  { unrestricted = false, resolveFile = false } = {},
 ): FsBrowseResponse {
   const firstRoot = roots[0];
   if (firstRoot === undefined) throw new PathSandboxError('NO_ACCESSIBLE_ROOTS');
 
-  const { realPath: currentPath, rootPath, kind } = resolveSafeTracePath(inputPath ?? firstRoot, roots, baseDir);
-  if (kind !== 'dir') throw new PathSandboxError('PATH_NOT_A_DIRECTORY');
+  const hasComputerRoot = unrestricted && windows && roots.length > 1;
+  if (inputPath === COMPUTER_ROOT_PATH) {
+    if (hasComputerRoot) {
+      return FsBrowseResponseSchema.parse({ currentPath: COMPUTER_ROOT_PATH, parentPath: null, allowedRoots: roots,
+        entries: roots.map((path) => ({ name: path, path, kind: 'dir' })) });
+    }
+    if (!unrestricted || windows) throw new PathSandboxError('INVALID_PATH');
+  }
+  const defaultStart = () => {
+    const base = resolve(baseDir);
+    const fixtures = join(base, 'data', 'fixtures');
+    try {
+      return statSync(fixtures, { throwIfNoEntry: false })?.isDirectory() ? fixtures : base;
+    } catch {
+      return base;
+    }
+  };
+  const path = inputPath === COMPUTER_ROOT_PATH ? firstRoot : inputPath ?? (unrestricted ? defaultStart() : firstRoot);
+  const { realPath, rootPath, kind } = resolveSafeTracePath(path, roots, baseDir);
+  let selectedFile: string | undefined;
+  if (kind === 'file') {
+    if (!resolveFile) throw new PathSandboxError('PATH_NOT_A_DIRECTORY');
+    assertTraceExtension(path, realPath);
+    if (!fitsBrowseContract(realPath)) throw new PathSandboxError('INVALID_PATH');
+    selectedFile = realPath;
+  }
 
-  const parentPath = pathKey(currentPath) === pathKey(rootPath) ? null : dirname(currentPath);
+  const currentPath = selectedFile === undefined ? realPath : dirname(selectedFile);
+  const parentPath = pathKey(currentPath) === pathKey(rootPath) ? (hasComputerRoot ? COMPUTER_ROOT_PATH : null)
+    : dirname(currentPath);
   // Shared path fields trim space. Avoid returning any navigation value that would then identify a different path.
   if (!fitsBrowseContract(currentPath) || (parentPath !== null && !fitsBrowseContract(parentPath))) {
     throw new PathSandboxError('INVALID_PATH');
@@ -406,5 +456,6 @@ export function browseSafeDirectory(
     if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
   });
-  return FsBrowseResponseSchema.parse({ currentPath, parentPath, allowedRoots: roots, entries });
+  return FsBrowseResponseSchema.parse({ currentPath, parentPath, allowedRoots: roots, entries,
+    ...(selectedFile === undefined ? {} : { selectedFile }) });
 }

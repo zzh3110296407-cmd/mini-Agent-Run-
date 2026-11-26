@@ -1,9 +1,13 @@
 import { z } from 'zod';
 
-export const DEFAULT_ALLOWED_TRACE_ROOTS = './data/fixtures,../Database/new data';
+export const DEFAULT_ALLOWED_TRACE_ROOTS = '*';
 
 export function splitAllowedTraceRoots(raw: string): string[] {
   return [...new Set(raw.split(',').map((path) => path.trim()).filter(Boolean))];
+}
+
+export function isUnrestrictedTraceRoots(rawRoots: readonly string[]): boolean {
+  return rawRoots.includes('*');
 }
 
 const PortSchema = z

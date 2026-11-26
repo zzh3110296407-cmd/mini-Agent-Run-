@@ -69,11 +69,14 @@ export const FsBrowseEntrySchema = z.object({
   modifiedAt: IsoDateTimeSchema.optional(),
 });
 
+export const COMPUTER_ROOT_PATH = '::computer::';
+
 export const FsBrowseResponseSchema = z.object({
   currentPath: NonBlankStringSchema,
   parentPath: NonBlankStringSchema.nullable(),
   allowedRoots: z.array(NonBlankStringSchema),
   entries: z.array(FsBrowseEntrySchema),
+  selectedFile: NonBlankStringSchema.optional(),
 });
 
 export const LogLineSchema = z.object({

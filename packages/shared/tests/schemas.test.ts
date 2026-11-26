@@ -136,6 +136,16 @@ describe('M1.1 public shared schemas', () => {
     expect(shared.TraceOverviewSchema.parse({ ...overview, file: padded })).toEqual(overview);
   });
 
+  it('preserves an optional file selected during directory browsing', () => {
+    const directory = { currentPath: '/traces', parentPath: null, allowedRoots: ['/traces'], entries: [entry] };
+    expect(shared.FsBrowseResponseSchema.parse(directory)).toEqual(directory);
+    expect(shared.FsBrowseResponseSchema.parse({ ...directory, selectedFile: ' /traces/sample.log ' }))
+      .toEqual({ ...directory, selectedFile: '/traces/sample.log' });
+    for (const selectedFile of ['', ' \t ']) {
+      expect(shared.FsBrowseResponseSchema.safeParse({ ...directory, selectedFile }).success).toBe(false);
+    }
+  });
+
   it('honors retry defaults and sequence bounds', () => {
     expect(shared.RetryRunRequestSchema.parse(undefined)).toEqual({});
     expect(shared.RetryRunRequestSchema.parse({ prompt: 'narrow down step 17' }))

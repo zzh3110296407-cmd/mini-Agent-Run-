@@ -2,7 +2,7 @@ import { createOpenAICompatibleProvider, type LLMProvider } from '@mini-agent-ru
 import { APP_NAME, HealthResponseSchema, type ToolMode } from '@mini-agent-run/shared';
 import Fastify from 'fastify';
 import { registerArtifactRoutes } from './artifact-routes.js';
-import { DEFAULT_ALLOWED_TRACE_ROOTS, splitAllowedTraceRoots } from './config/env.js';
+import { DEFAULT_ALLOWED_TRACE_ROOTS, isUnrestrictedTraceRoots, splitAllowedTraceRoots } from './config/env.js';
 import { createSqliteArtifactStore } from './db/artifact-store.js';
 import { openAppDatabase, recoverStaleRuns, type DatabaseOwnerLock } from './db/database.js';
 import { createSqliteRunStore } from './db/run-repository.js';
@@ -75,11 +75,15 @@ export function buildApp(options: BuildAppOptions = {}, ownerLock?: DatabaseOwne
     });
   });
 
-  app.get<{ Querystring: { path?: unknown } }>('/api/fs/browse', async (request, reply) => {
+  app.get<{ Querystring: { path?: unknown; resolveFile?: unknown } }>('/api/fs/browse', async (request, reply) => {
     try {
-      const { path } = request.query;
+      const { path, resolveFile } = request.query;
       if (path !== undefined && typeof path !== 'string') throw new PathSandboxError('INVALID_PATH');
-      return browseSafeDirectory(path, resolveRoots(), baseDir);
+      if (resolveFile !== undefined && resolveFile !== '0' && resolveFile !== '1'
+        && resolveFile !== 'false' && resolveFile !== 'true') throw new PathSandboxError('INVALID_PATH');
+      return browseSafeDirectory(path, resolveRoots(), baseDir, {
+        unrestricted: isUnrestrictedTraceRoots(rawRoots), resolveFile: resolveFile === '1' || resolveFile === 'true',
+      });
     } catch (error) {
       if (!(error instanceof PathSandboxError)) throw error;
       return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });

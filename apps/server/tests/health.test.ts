@@ -34,7 +34,7 @@ describe('M0 environment configuration', () => {
       DB_PATH: './data/agent-run.db',
       ALLOWED_TRACE_ROOTS: DEFAULT_ALLOWED_TRACE_ROOTS,
     });
-    expect(DEFAULT_ALLOWED_TRACE_ROOTS).toBe('./data/fixtures,../Database/new data');
+    expect(DEFAULT_ALLOWED_TRACE_ROOTS).toBe('*');
   });
 
   it('accepts process-style strings and keeps the supplied model configuration', () => {

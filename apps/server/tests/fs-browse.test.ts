@@ -1,4 +1,4 @@
-import { FsBrowseResponseSchema } from '@mini-agent-run/shared';
+import { COMPUTER_ROOT_PATH, FsBrowseResponseSchema } from '@mini-agent-run/shared';
 import fc from 'fast-check';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -76,8 +76,31 @@ describe('[F01_SAFE_PATH_BROWSE] safe trace paths and directory browsing', () =>
       expect(response.statusCode).toBe(200);
       const data = FsBrowseResponseSchema.parse(response.json());
       expect(data.currentPath).toBe(fs.realpathSync.native(join(WORKSPACE_ROOT, 'data', 'fixtures')));
-      expect(data.parentPath).toBeNull();
+      expect(data.parentPath).toBe(dirname(data.currentPath));
       expect(data.entries.map(({ name }) => name)).not.toContain('.gitkeep');
+      const parent = await defaults.inject(browseUrl(data.parentPath!));
+      expect(parent.statusCode, parent.body).toBe(200);
+      expect(parent.json().currentPath).toBe(data.parentPath);
+      const drive = parse(data.currentPath).root;
+      const top = await defaults.inject(browseUrl(drive));
+      expect(top.statusCode, top.body).toBe(200);
+      expect(top.json().currentPath).toBe(drive);
+      expect(top.json().parentPath).toBe(data.allowedRoots.length > 1 ? COMPUTER_ROOT_PATH : null);
+      if (process.platform !== 'win32' || data.allowedRoots.length > 1) {
+        const computer = await defaults.inject(browseUrl(COMPUTER_ROOT_PATH));
+        expect(computer.statusCode, computer.body).toBe(200);
+        if (process.platform === 'win32') {
+          expect(computer.json()).toEqual({ currentPath: COMPUTER_ROOT_PATH, parentPath: null,
+            allowedRoots: data.allowedRoots, entries: data.allowedRoots.map((path) => ({ name: path, path, kind: 'dir' })) });
+        } else {
+          expect(computer.json()).toMatchObject({ currentPath: '/', parentPath: null, allowedRoots: ['/'] });
+        }
+      }
+      for (const name of ['.env', '.env.local', '.ssh', '.aws', '.gnupg', '.git', '.npmrc', 'node_modules']) {
+        const denied = await defaults.inject(browseUrl(name));
+        expect(denied.statusCode).toBe(403);
+        expect(denied.json().error.code).toBe('PATH_FORBIDDEN');
+      }
       for (const path of ['../Database/offline-eval', '../../Database/offline-eval', '.env']) {
         expect((await defaults.inject(browseUrl(path))).statusCode).toBe(403);
       }
@@ -166,6 +189,33 @@ describe('[F01_SAFE_PATH_BROWSE] safe trace paths and directory browsing', () =>
     expect((await readBrowse()).entries.map(({ name }) => name)).toEqual(['safe']);
   });
 
+  it('protects offline evaluation data and aliases in default and configured roots', async () => {
+    const database = join(root, 'Database');
+    const evaluation = join(database, 'offline-eval');
+    const answer = join(evaluation, 'test.jsonl');
+    const alias = join(root, 'alias');
+    fs.mkdirSync(evaluation, { recursive: true });
+    fs.writeFileSync(answer, '{}');
+    makeDirectoryLink(evaluation, alias);
+    await expectError(browseUrl(evaluation), 403, 'PATH_FORBIDDEN');
+    await expectError(browseUrl(alias), 403, 'PATH_FORBIDDEN');
+    expect((await readBrowse(database)).entries).toEqual([]);
+
+    const defaults = buildApp({ baseDir: fixture });
+    try {
+      for (const url of [browseUrl(evaluation), browseUrl(alias), browseUrl(answer) + '&resolveFile=1']) {
+        const response = await defaults.inject(url);
+        expect(response.statusCode).toBe(403);
+        expect(response.json().error.code).toBe('PATH_FORBIDDEN');
+      }
+      const session = await defaults.inject({ method: 'POST', url: '/api/sessions', payload: { targetPath: evaluation } });
+      expect(session.statusCode).toBe(403);
+      expect(session.json().error.code).toBe('PATH_FORBIDDEN');
+    } finally {
+      await defaults.close();
+    }
+  });
+
   it('validates safe files and distinguishes missing paths from non-directories', async () => {
     const file = join(root, 'valid.json');
     fs.writeFileSync(file, '{}');
@@ -173,6 +223,52 @@ describe('[F01_SAFE_PATH_BROWSE] safe trace paths and directory browsing', () =>
     await expectError(browseUrl(file), 400, 'PATH_NOT_A_DIRECTORY');
     await expectError(browseUrl(join(file, 'child')), 400, 'PATH_NOT_A_DIRECTORY');
     await expectError(browseUrl(join(root, 'missing-sub')), 404, 'PATH_NOT_FOUND');
+  });
+
+  it('canonically resolves supported files only when requested and retains directory containment', async () => {
+    const file = join(root, 'valid-中.jsonl');
+    fs.writeFileSync(file, '{}');
+    fs.writeFileSync(join(root, 'unsupported.exe'), '');
+    fs.writeFileSync(join(root, 'notes.md'), '');
+    fs.writeFileSync(join(root, '.env'), '');
+    fs.mkdirSync(join(root, '.ssh'));
+    fs.writeFileSync(join(root, '.ssh', 'sample.log'), '');
+    fs.writeFileSync(join(outside, 'private.log'), '');
+    const fileUrl = (path: string) => browseUrl(path) + '&resolveFile=1';
+    const directory = await readBrowse(root);
+    for (const flag of ['1', 'true']) {
+      const response = await app.inject(browseUrl(file) + '&resolveFile=' + flag);
+      expect(response.statusCode, response.body).toBe(200);
+      expect(FsBrowseResponseSchema.parse(response.json())).toEqual({ ...directory, selectedFile: file });
+    }
+    for (const suffix of ['', '&resolveFile=0', '&resolveFile=false']) {
+      await expectError(browseUrl(file) + suffix, 400, 'PATH_NOT_A_DIRECTORY');
+    }
+    await expectError(fileUrl(join(root, 'unsupported.exe')), 400, 'UNSUPPORTED_TRACE_FILE');
+    await expectError(fileUrl(join(root, 'notes.md')), 400, 'UNSUPPORTED_TRACE_FILE');
+    await expectError(fileUrl(join(root, '.env')), 403, 'PATH_FORBIDDEN');
+    await expectError(fileUrl(join(root, '.ssh', 'sample.log')), 403, 'PATH_FORBIDDEN');
+    await expectError(fileUrl(join(outside, 'private.log')), 403, 'PATH_OUTSIDE_ALLOWED_ROOTS');
+    await expectError(fileUrl(join(root, 'missing.log')), 404, 'PATH_NOT_FOUND');
+    await expectError(browseUrl(COMPUTER_ROOT_PATH), 400, 'INVALID_PATH');
+    await expectError(browseUrl(file) + '&resolveFile=yes', 400, 'INVALID_PATH');
+    await expectError(browseUrl(file) + '&resolveFile=1&resolveFile=0', 400, 'INVALID_PATH');
+  });
+
+  it('starts at a custom base directory when its fixture folder is unavailable', async () => {
+    const defaults = buildApp({ baseDir: fixture });
+    try {
+      const response = await defaults.inject(route);
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toMatchObject({ currentPath: fixture, parentPath: dirname(fixture) });
+      const file = join(root, 'selected.txt');
+      fs.writeFileSync(file, 'trace');
+      const selected = await defaults.inject(browseUrl(file) + '&resolveFile=1');
+      expect(selected.statusCode, selected.body).toBe(200);
+      expect(selected.json()).toMatchObject({ currentPath: root, parentPath: fixture, selectedFile: file });
+    } finally {
+      await defaults.close();
+    }
   });
 
   it.each([

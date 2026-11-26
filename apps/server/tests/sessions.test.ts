@@ -1,5 +1,5 @@
 import {
-  SessionDetailSchema, SessionListItemSchema, SessionSchema, TextSliceResponseSchema,
+  COMPUTER_ROOT_PATH, SessionDetailSchema, SessionListItemSchema, SessionSchema, TextSliceResponseSchema,
   type LogLevel, type RunStatus,
 } from '@mini-agent-run/shared';
 import type Database from 'better-sqlite3';
@@ -13,6 +13,7 @@ import { buildApp, type BuildAppOptions } from '../src/app.js';
 import { acquireDatabaseOwnerLock, openAppDatabase, recoverStaleRuns } from '../src/db/database.js';
 import { sliceTextContent } from '../src/fs/file-slice.js';
 import { readSafeSessionFile } from '../src/fs/path-sandbox.js';
+import { createServerTraceWorkspace } from '../src/fs/trace-workspace.js';
 import { startServer } from '../src/start-server.js';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -118,6 +119,21 @@ describe('[F02_SESSION_WORKSPACE] persistent sessions and scoped file slices', (
     const route = sessionsUrl + '/' + id + '/file-slice';
     return query === undefined ? route : route + '?' + new URLSearchParams(query).toString();
   }
+
+  it('rejects the virtual computer target and confines traces to the session in default mode', async () => {
+    const app = openTestApp({ allowedTraceRoots: undefined });
+    expectError(await app.inject({ method: 'POST', url: sessionsUrl, payload: { targetPath: COMPUTER_ROOT_PATH } }),
+      400, 'INVALID_PATH');
+    const session = await create(app, directoryA);
+    const other = join(directoryB, 'outside.log');
+    fs.writeFileSync(other, 'outside the session');
+    expect((await app.inject(fileSlice(session.id, { file: 'sample.LOG' }))).statusCode).toBe(200);
+    expectError(await app.inject(fileSlice(session.id, { file: other })), 403, 'PATH_OUTSIDE_SESSION_SCOPE');
+    const workspace = createServerTraceWorkspace(session, { baseDir: fixture });
+    expect(workspace.readFile('sample.LOG', ['*']).content).toBe(sampleText);
+    expect(() => workspace.readFile(other, ['*']))
+      .toThrow(expect.objectContaining({ code: 'PATH_OUTSIDE_SESSION_SCOPE' }));
+  });
 
   it('enforces four-table, WAL, unique, and composite foreign-key constraints in SQLite', () => {
     const db = openAppDatabase(dbPath);
