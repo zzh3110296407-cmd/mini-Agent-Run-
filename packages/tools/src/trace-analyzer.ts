@@ -145,24 +145,28 @@ function errorEvidencePath(row: TraceObject): JsonPath | undefined {
   const structured = recordedError(row);
   if (structured) return structured.failed ? [structured.field] : undefined;
   if (!isToolMessage(row)) return;
-  const bodyField = ['content', 'text', 'message'].find((key) => text(row[key]) || asObject(row[key]));
-  if (bodyField === undefined) return;
-  const payload = asObject(row[bodyField]);
-  if (payload) {
-    const field = structuredFailureField(payload);
-    return field === undefined ? undefined : [bodyField, field];
-  }
-  const body = text(row[bodyField]) ?? '';
-  const first = body.trimStart().charAt(0);
-  if (first === '{' || first === '[') {
-    try {
-      const parsed = asObject(JSON.parse(body));
-      return parsed && structuredFailureField(parsed) !== undefined ? [bodyField] : undefined;
-    } catch (error) {
-      if (!(error instanceof SyntaxError)) throw error;
+  for (const bodyField of ['content', 'text', 'message']) {
+    const value = row[bodyField];
+    const payload = asObject(value);
+    if (payload) {
+      const field = structuredFailureField(payload);
+      if (field !== undefined) return [bodyField, field];
+      continue;
     }
+    const body = text(value);
+    if (body === undefined) continue;
+    const first = body.trimStart().charAt(0);
+    if (first === '{' || first === '[') {
+      try {
+        const parsed = asObject(JSON.parse(body));
+        if (parsed && structuredFailureField(parsed) !== undefined) return [bodyField];
+        continue;
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+      }
+    }
+    if (strongError.test(body)) return [bodyField];
   }
-  return strongError.test(body) ? [bodyField] : undefined;
 }
 
 function firstEvidence(

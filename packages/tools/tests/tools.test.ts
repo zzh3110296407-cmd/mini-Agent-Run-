@@ -290,6 +290,39 @@ describe('[F03_PATH_SCOPED_TOOLS] trace analysis and workspace tools', () => {
     }
   });
 
+  it.each([
+    ['request metadata object', { content: { requestId: 'req-42' } }],
+    ['object and neutral text', { content: { requestId: 'req-42' }, text: 'Request received' }],
+    ['serialized request metadata', { content: '{"requestId":"req-42"}' }],
+    ['neutral text', { content: 'Request received' }],
+  ] as const)('M5.3-03 R2b finds the sibling failure message after %s', async (_, payload) => {
+    const message = 'ERROR: Inventory service unavailable';
+    const samples = [
+      { file: 'mixed.json', fields: { ...payload, message }, failed: true },
+      { file: 'mixed-success.json', fields: { ...payload, message, isError: false }, failed: false },
+      { file: 'mixed-neutral.json', fields: { ...payload, message: 'Received the request' }, failed: false },
+    ].map((sample) => ({ ...sample, raw: JSON.stringify({ runs: [{ messages: [
+      { role: 'assistant', tool_calls: [{ id: 'inventory', name: 'check_stock', arguments: {} }] },
+      { role: 'tool', tool_call_id: 'inventory', name: 'check_stock', ...sample.fields },
+    ] }] }, null, 2) }));
+    const { call } = build(Object.fromEntries(samples.map(({ file, raw }) => [file, raw])));
+    for (const { file, raw, failed } of samples) {
+      const inspected = await call('inspect_trace', { file });
+      expect(inspected.isError, file).toBe(false);
+      const lines = raw.split('\n');
+      const classify = createTraceLineClassifier(raw);
+      const highlighted = lines.flatMap((line, index) => classify(line, index + 1) === 'error' ? [index + 1] : []);
+      const line = lines.findIndex((value) => value.includes(message)) + 1;
+      const firstError = failed ? { step: 1, line, snippet: lines[line - 1]?.trim() } : null;
+      expect(inspected.data, file).toMatchObject({
+        threeState: { hasToolError: failed, toolErrorCount: Number(failed) },
+        toolCalls: [{ step: 0, toolName: 'check_stock', isError: failed }],
+        anomalies: { firstError },
+      });
+      expect(highlighted, file).toEqual(failed ? [line] : []);
+    }
+  });
+
   it('uses explicit tool success and retains structured and legacy text failures', async () => {
     const fixtures = [
       ['success.json', '{"ok":true,"error":null}', false, 0],
