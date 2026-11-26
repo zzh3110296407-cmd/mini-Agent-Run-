@@ -119,14 +119,15 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · W3-01', () => {
 
   it.each([
     {
-      platform: 'POSIX', filePath: '/review/ses_a/Second.JSONL', file: '/review/ses_a/Second.JSONL',
+      platform: 'POSIX', directoryPath: '/review/ses_a', filePath: '/review/ses_a/Second.JSONL', file: '/review/ses_a/Second.JSONL',
       other: '/review/ses_a/subdir/Second.JSONL', name: 'Second.JSONL',
     },
     {
-      platform: 'Windows', filePath: 'C:\\Review\\Ses_A\\Second.JSONL', file: 'c:/review/ses_a/second.jsonl',
+      platform: 'Windows', directoryPath: 'C:\\Review\\Ses_A', filePath: 'C:\\Review\\Ses_A\\Second.JSONL',
+      file: 'c:/review/ses_a/second.jsonl',
       other: 'c:/review/ses_a/subdir/second.jsonl', name: './second.jsonl',
     },
-  ])('U2-08 $platform 的同名文件分别匹配逐行摘要与证据', ({ filePath, file, other, name }) => {
+  ])('U2-08 $platform 的同名文件分别匹配逐行摘要与证据', ({ directoryPath, filePath, file, other, name }) => {
     const conclusion: InvestigationConclusion = {
       summary: 'Findings', recommendations: [],
       errorSummaries: [
@@ -141,7 +142,7 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · W3-01', () => {
         { kind: 'file_line', file, startLine: 7, label: '当前文件证据' },
       ],
     };
-    const context = { filePath, sourceMode: 'file' as const, artifactId: null, conclusions: [conclusion] };
+    const context = { filePath, directoryPath, sourceMode: 'file' as const, artifactId: null, conclusions: [conclusion] };
     const resolve = (lineNumber: number, sourcePath = filePath) => resolveErrorLineSummary(
       { lineNumber, level: 'error', text: '{"tool":"other","error":"range fallback"}' },
       { ...context, filePath: sourcePath },
@@ -157,6 +158,31 @@ describe('F11_LARGE_LOG_INSPECTOR_UI · W3-01', () => {
     expect(resolve(6, other)).toEqual({ text: '子目录模型摘要', source: 'ai' });
     expect(resolve(7, other)).toEqual({ text: '子目录证据', source: 'ai' });
     expect(resolve(10, 'subdir/Second.JSONL')).toEqual({ text: '带目录的相对路径', source: 'ai' });
+  });
+
+  it.each([
+    { platform: 'POSIX', directoryPath: '/review/session', absolute: '/review/session/batch/worker.log' },
+    { platform: 'Windows', directoryPath: 'C:\\Review\\Session', absolute: 'c:/review/session/Batch\\Worker.log' },
+    { platform: 'UNC', directoryPath: '\\\\Host\\Share\\Session', absolute: '//host/Share/Session/batch/Worker.log' },
+  ])('U2-08 $platform 会话以根路径对齐绝对和相对来源', ({ directoryPath, absolute }) => {
+    const relative = 'batch/worker.log';
+    const conclusion: InvestigationConclusion = {
+      summary: 'Findings', recommendations: [],
+      errorSummaries: [{ file: relative, line: 6, summary: '模型解释' }],
+      evidence: [{ kind: 'file_line', file: absolute, startLine: 7, label: '证据解释' }],
+    };
+    const resolve = (filePath: string, lineNumber: number) => resolveErrorLineSummary(
+      { lineNumber, level: 'error', text: 'ERROR original' },
+      { filePath, directoryPath, sourceMode: 'file', artifactId: null, conclusions: [conclusion] },
+    );
+    for (const filePath of [absolute, relative, './batch//tmp/../worker.log']) {
+      expect([resolve(filePath, 6), resolve(filePath, 7)]).toEqual([
+        { text: '模型解释', source: 'ai' },
+        { text: '证据解释', source: 'ai' },
+      ]);
+    }
+    expect(resolve('other/batch/worker.log', 6)).toEqual({ text: 'original', source: 'extracted' });
+    expect(resolve('other/batch/worker.log', 7)).toEqual({ text: 'original', source: 'extracted' });
   });
 
   it('U2-08 任意恶意或畸形行都能提取非空摘要', () => {

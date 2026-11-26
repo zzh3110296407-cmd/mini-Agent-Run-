@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { MAX_ARTIFACT_SLICE_LINES, type FsBrowseEntry, type LogLine, type Session } from '@mini-agent-run/shared';
+import { MAX_ARTIFACT_SLICE_LINES, type FsBrowseEntry, type InvestigationConclusion, type LogLine, type Session } from '@mini-agent-run/shared';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { defineComponent, h, nextTick, ref } from 'vue';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -104,7 +104,7 @@ function mockLogs({
   };
 }
 
-async function inspectorFor(initial: Session) {
+async function inspectorFor(initial: Session, conclusions: readonly InvestigationConclusion[] = []) {
   const sessionRef = ref<Session | null>(initial);
   const open = ref(true);
   let inspector!: ReturnType<typeof useLogInspector>;
@@ -112,7 +112,7 @@ async function inspectorFor(initial: Session) {
     setup() {
       inspector = useLogInspector({ session: sessionRef, open });
       return () => sessionRef.value && open.value
-        ? h(LargeLogInspector, { session: sessionRef.value, inspector, conclusions: [] }) : null;
+        ? h(LargeLogInspector, { session: sessionRef.value, inspector, conclusions }) : null;
     },
   }), { attachTo: document.body });
   wrappers.push(wrapper);
@@ -139,6 +139,30 @@ afterEach(() => {
 });
 
 describe('F11_LARGE_LOG_INSPECTOR_UI · 右栏检视器', () => {
+  it('U2-08 同一子目录文件以不同路径打开时保留模型和证据摘要', async () => {
+    const relative = 'batch/worker.log';
+    const absolute = session.targetPath + '/' + relative;
+    const sameFile = large(7, { 6: 'ERROR original six', 7: 'ERROR original seven' });
+    const api = mockLogs({ files: { [absolute]: sameFile, [relative]: sameFile } });
+    const ui = await inspectorFor(session, [{
+      summary: 'Findings', recommendations: [],
+      errorSummaries: [{ file: relative, line: 6, summary: '模型摘要' }],
+      evidence: [{ kind: 'file_line', file: relative, startLine: 7, label: '证据标签' }],
+    }]);
+
+    for (const file of [relative, absolute]) {
+      ui.inspector.openTarget({ mode: 'file', sessionId: session.id, file, line: 1, label: file });
+      await flushPromises();
+      expect(api.see(fileRoute(session), { file, level: null })).toBe(true);
+      expect(api.see(fileRoute(session), { file, level: 'error' })).toBe(true);
+      expect(ui.line(6).get(test('log-line-text')).text()).toBe('ERROR original six');
+      expect(ui.errorAt(6).get('[data-summary-source="ai"]').text()).toBe('AI 摘要');
+      expect(ui.errorAt(6).get(test('log-error-preview')).text()).toBe('模型摘要');
+      expect(ui.errorAt(7).get('[data-summary-source="ai"]').text()).toBe('AI 摘要');
+      expect(ui.errorAt(7).get(test('log-error-preview')).text()).toBe('证据标签');
+    }
+  });
+
   it('W3-02 绑定文件无 file 参数，目录按真实路径选择并记忆，显示空目录和失败', async () => {
     const api = mockLogs({ dirs: { [session.targetPath]: listing, [second.targetPath]: [] } });
     const ui = await inspectorFor(single);

@@ -21,6 +21,7 @@ const {
 } = props.inspector;
 const summaryContext = computed(() => ({
   sourceMode: sourceMode.value, filePath: selectedFilePath.value, artifactId: activeArtifactId.value,
+  directoryPath: props.session.pathType === 'dir' ? props.session.targetPath : undefined,
   singleFile: props.session.pathType === 'file', conclusions: props.conclusions,
 }));
 const showEmptyDirectory = computed(() => sourceMode.value === 'file' && props.session.pathType === 'dir'

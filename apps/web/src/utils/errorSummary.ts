@@ -3,6 +3,7 @@ import type { InvestigationConclusion, LogLine } from '@mini-agent-run/shared';
 type ErrorSummaryContext = {
   sourceMode: 'file' | 'artifact';
   filePath: string | null;
+  directoryPath?: string;
   artifactId: string | null;
   singleFile?: boolean;
   conclusions: readonly InvestigationConclusion[];
@@ -43,27 +44,51 @@ export function extractStructuredErrorSummary(rawText: string): string {
   return text.replace(timestamp, '').replace(severity, '').trim() || unspecified;
 }
 
-function matchesFile(path: string | null, file: string): boolean {
+const windowsVolume = /^(?:[a-z]:|\/\/[^/]+\/[^/]+)/u;
+
+function resolveFileKey(path: string, directory: string, windows: boolean): string {
+  let resolved = path;
+  if (windows && path.startsWith('/') && !path.startsWith('//')) {
+    resolved = (windowsVolume.exec(directory)?.[0] ?? '') + path;
+  } else if (directory && !path.startsWith('/') && !(windows && windowsVolume.test(path))) {
+    resolved = directory.replace(/\/+$/u, '') + '/' + path;
+  }
+
+  const volume = windows ? windowsVolume.exec(resolved)?.[0] ?? '' : '';
+  const tail = resolved.slice(volume.length);
+  const rooted = tail.startsWith('/') || volume.startsWith('//');
+  const segments: string[] = [];
+  for (const segment of tail.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment !== '..') segments.push(segment);
+    else if (segments.length && segments.at(-1) !== '..') segments.pop();
+    else if (!rooted) segments.push(segment);
+  }
+  return volume + (rooted ? '/' : '') + segments.join('/');
+}
+
+function matchesFile(path: string | null, file: string, directoryPath?: string): boolean {
   if (path === null) return false;
-  const windows = /^(?:[a-z]:|\\\\)/iu.test(path);
-  const normalize = (value: string) => {
-    const normalized = value.replaceAll('\\', '/').replace(/^(?:\.\/)+/u, '');
-    return windows ? normalized.toLowerCase() : normalized;
-  };
-  const actual = normalize(path);
+  const windows = /^(?:[a-z]:|[\\/]{2})/iu.test(directoryPath ?? path);
+  const normalize = (value: string) => windows ? value.replaceAll('\\', '/').toLowerCase() : value;
+  const directory = normalize(directoryPath ?? '');
+  const actual = resolveFileKey(normalize(path), directory, windows);
   const observed = normalize(file);
-  return actual === observed || (!observed.includes('/') && actual.endsWith('/' + observed));
+  const name = observed.replace(/^(?:\.\/)+/u, '');
+  return actual === resolveFileKey(observed, directory, windows)
+    || (!name.includes('/') && actual.endsWith('/' + name));
 }
 
 export function resolveErrorLineSummary(
   row: LogLine, context: ErrorSummaryContext,
 ): { text: string; source: 'ai' | 'extracted' } {
-  const { artifactId, conclusions, filePath, singleFile, sourceMode } = context;
+  const { artifactId, conclusions, directoryPath, filePath, singleFile, sourceMode } = context;
   for (let index = conclusions.length - 1; index >= 0; index--) {
     const exact = conclusions[index]?.errorSummaries?.find((entry) => entry.line === row.lineNumber
       && (sourceMode === 'artifact'
         ? artifactId !== null && entry.artifactId === artifactId
-        : entry.artifactId === undefined && (entry.file === undefined ? singleFile === true : matchesFile(filePath, entry.file))));
+        : entry.artifactId === undefined
+          && (entry.file === undefined ? singleFile === true : matchesFile(filePath, entry.file, directoryPath))));
     if (exact) return { text: exact.summary, source: 'ai' };
   }
   for (let index = conclusions.length - 1; index >= 0; index--) {
@@ -71,7 +96,7 @@ export function resolveErrorLineSummary(
       && row.lineNumber >= ref.startLine && row.lineNumber <= (ref.endLine ?? ref.startLine)
       && (ref.kind === 'artifact_line'
         ? sourceMode === 'artifact' && ref.artifactId === artifactId
-        : sourceMode === 'file' && matchesFile(filePath, ref.file)));
+        : sourceMode === 'file' && matchesFile(filePath, ref.file, directoryPath)));
     if (evidence) return { text: evidence.label, source: 'ai' };
   }
   return { text: extractStructuredErrorSummary(row.text), source: 'extracted' };
