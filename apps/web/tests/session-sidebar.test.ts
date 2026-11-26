@@ -267,14 +267,14 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     let latest = deferred<FsBrowseResponse | Response>();
     const { wrapper } = await setup({ browseAt: (path) => {
       if (path === folder) return child;
-      if (path === '/other' || path === '/other/recent') return latest.result;
+      if (path === '/other' || path === '/other/recent' || path === '/other/final') return latest.result;
       if (path === '/older') return older.result;
       return browse;
     } });
     await openPicker(wrapper);
     const parent = () => wrapper.get<HTMLButtonElement>(byTest('path-parent-btn'));
     expect(parent().element.disabled).toBe(true);
-    const dialog = wrapper.get(byTest('path-picker-modal'));
+    const dialog = () => wrapper.get(byTest('path-picker-modal'));
     const link = () => wrapper.get(byTest('fs-entry-row'));
     const manual = () => wrapper.get<HTMLInputElement>(byTest('path-address-input'));
     await manual().setValue('/safe/pasted.log');
@@ -300,7 +300,7 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     expect(manual().element.value).toBe('/other');
     older.resolve(problem(403, 'PATH_OUTSIDE_ALLOWED_ROOTS'));
     await flushPromises();
-    expect(dialog.find(byTest('path-error-banner')).exists()).toBe(false);
+    expect(dialog().find(byTest('path-error-banner')).exists()).toBe(false);
     expect(manual().element.value).toBe('/other');
     older = deferred();
     latest = deferred();
@@ -313,6 +313,33 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     latest.resolve({ ...browse, currentPath: '/other/recent' });
     await flushPromises();
     expect(manual().element.value).toBe('/other/recent');
+
+    older = deferred();
+    latest = deferred();
+    const fresh = { name: 'fresh.log', path: '/other/final/fresh.log', kind: 'file' } as const;
+    const stale = { name: 'stale.log', path: '/older/stale.log', kind: 'file' } as const;
+    const visibleRows = () => dialog().findAll(byTest('fs-entry-row'))
+      .map((row) => [row.text(), row.attributes('data-entry-path')]);
+    async function returnDirectory(pending: typeof older, data: FsBrowseResponse) {
+      const response = Response.json(data);
+      const decoded = deferred<void>();
+      const read = response.json.bind(response);
+      vi.spyOn(response, 'json').mockImplementation(async () => {
+        const body: unknown = await read();
+        decoded.resolve();
+        return body;
+      });
+      pending.resolve(response);
+      await decoded.result;
+      await flushPromises();
+    }
+    await jump('/older');
+    await jump('/other/final');
+    await returnDirectory(latest, { ...browse, currentPath: '/other/final', entries: [fresh] });
+    expect(visibleRows()).toEqual([[fresh.name, fresh.path]]);
+    await returnDirectory(older, { ...browse, currentPath: '/older', entries: [stale] });
+    expect(manual().element.value).toBe('/other/final');
+    expect(visibleRows()).toEqual([[fresh.name, fresh.path]]);
   });
 
   it('W1-06 按 403、404、503 和 400 区分路径错误，验证后原样提交手动路径', async () => {

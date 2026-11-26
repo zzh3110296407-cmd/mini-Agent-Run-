@@ -255,6 +255,36 @@ describe('[F01_SAFE_PATH_BROWSE] safe trace paths and directory browsing', () =>
     await expectError(browseUrl(file) + '&resolveFile=1&resolveFile=0', 400, 'INVALID_PATH');
   });
 
+  it.each(['default', 'allowlist'])('lists only the explicitly selected hidden trace in %s mode', async (mode) => {
+    const names = ['visible.log', '.trace.log', '.other.log', '.env.trace.log', '.notes.md'];
+    for (const name of names) fs.writeFileSync(join(root, name), 'fixture');
+    const server = mode === 'default' ? buildApp({ baseDir: fixture }) : app;
+    const locate = (name: string) => browseUrl(join(root, name)) + '&resolveFile=1';
+    try {
+      const ordinary = await server.inject(browseUrl(root));
+      expect(ordinary.statusCode, ordinary.body).toBe(200);
+      expect(FsBrowseResponseSchema.parse(ordinary.json()).entries.map(({ name }) => name)).toEqual(['visible.log']);
+
+      const response = await server.inject(locate('.trace.log'));
+      expect(response.statusCode, response.body).toBe(200);
+      const selected = FsBrowseResponseSchema.parse(response.json());
+      const file = fs.realpathSync.native(join(root, '.trace.log'));
+      expect(selected).toMatchObject({ currentPath: root, selectedFile: file });
+      expect(selected.entries.map(({ name }) => name)).toEqual(['.trace.log', 'visible.log']);
+      expect(selected.entries.filter(({ path }) => path === selected.selectedFile))
+        .toEqual([{ name: '.trace.log', path: file, kind: 'file', byteSize: 7, modifiedAt: expect.any(String) }]);
+
+      const forbidden = await server.inject(locate('.env.trace.log'));
+      expect(forbidden.statusCode).toBe(403);
+      expect(forbidden.json().error.code).toBe('PATH_FORBIDDEN');
+      const invalid = await server.inject(locate('.notes.md'));
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json().error.code).toBe('UNSUPPORTED_TRACE_FILE');
+    } finally {
+      if (mode === 'default') await server.close();
+    }
+  });
+
   it('starts at a custom base directory when its fixture folder is unavailable', async () => {
     const defaults = buildApp({ baseDir: fixture });
     try {

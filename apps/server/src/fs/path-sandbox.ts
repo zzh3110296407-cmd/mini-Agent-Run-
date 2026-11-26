@@ -429,14 +429,19 @@ export function browseSafeDirectory(
     throw new PathSandboxError('INVALID_PATH');
   }
 
+  const selectedName = selectedFile === undefined ? undefined : basename(selectedFile);
+  const selectedDotfile = selectedName?.startsWith('.') ? selectedName : undefined;
   const entries: FsBrowseEntry[] = [];
   for (const entry of withFsErrors(() => readdirSync(currentPath, { withFileTypes: true }))) {
     const name = entry.name.trim();
-    if (!name || entry.name.startsWith('.') || isForbiddenSegment(entry.name)) continue;
+    const hidden = entry.name.startsWith('.');
+    if (!name || isForbiddenSegment(entry.name) || (hidden && entry.name !== selectedDotfile)) continue;
 
     try {
       const { realPath: path, metadata } = inspectTracePath(join(currentPath, entry.name), roots, baseDir);
       if (!fitsBrowseContract(path)) continue;
+      if (hidden && (path !== selectedFile || !metadata.isFile())) continue;
+      if (!hidden && selectedDotfile !== undefined && path === selectedFile) continue;
       const modifiedAt = metadata.mtime.toISOString();
       if (metadata.isDirectory()) {
         entries.push({ name, path, kind: 'dir', modifiedAt });
