@@ -72,7 +72,7 @@ function handleKey(event: KeyboardEvent) {
         v-bind="$attrs" @keydown="handleKey"
       >
         <header class="ui-dialog-header">
-          <h2 :id="titleId">{{ title }}</h2>
+          <slot name="title" :title-id="titleId"><h2 :id="titleId">{{ title }}</h2></slot>
           <UiButton variant="ghost" size="sm" aria-label="关闭" @click="emit('close')"><UiIcon name="x" /></UiButton>
         </header>
         <div class="ui-dialog-content"><slot /></div>

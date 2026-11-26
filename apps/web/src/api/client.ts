@@ -90,7 +90,8 @@ export function createApiClient({
 
   return {
     getHealth: () => request('/api/health', HealthResponseSchema),
-    browseFs: (path?: string) => request(withQuery('/api/fs/browse', { path }), FsBrowseResponseSchema),
+    browseFs: (path?: string, options?: { resolveFile?: boolean }) =>
+      request(withQuery('/api/fs/browse', { path, resolveFile: options?.resolveFile ? 1 : undefined }), FsBrowseResponseSchema),
     listSessions: () => request('/api/sessions', sessionsSchema),
     createSession: (input: CreateSessionRequest) => request('/api/sessions', SessionSchema, { method: 'POST', body: input }),
     getSessionDetail: (id: SessionId) => request(sessionPath(id), SessionDetailSchema),

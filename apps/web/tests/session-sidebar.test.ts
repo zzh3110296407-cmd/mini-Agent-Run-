@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
-import { CreateSessionRequestSchema, UpdateSessionRequestSchema, type FsBrowseResponse, type SessionListItem } from '@mini-agent-run/shared';
+import { COMPUTER_ROOT_PATH, CreateSessionRequestSchema, UpdateSessionRequestSchema,
+  type FsBrowseResponse, type SessionListItem } from '@mini-agent-run/shared';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../src/App.vue';
@@ -118,6 +119,20 @@ function key(target: EventTarget, key: string) {
   return flushPromises();
 }
 
+function paste(input: HTMLInputElement, value: string) {
+  const clipboardData = new DataTransfer();
+  clipboardData.setData('text/plain', value);
+  input.select();
+  input.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+  return flushPromises();
+}
+
+function sessionPosts(fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>) {
+  return fetchImpl.mock.calls
+    .filter(([url, init]) => url === '/api/sessions' && init?.method === 'POST')
+    .map(([, init]) => JSON.parse(String(init?.body)));
+}
+
 describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
   it('W1-01 健康探针可重试，主题、视口、右栏拖动和按键联动', async () => {
     let check = 0;
@@ -230,10 +245,14 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     await flushPromises();
     await entry().trigger('click');
     expect(entry().attributes('aria-pressed')).toBe('true');
+    expect(wrapper.get<HTMLInputElement>(byTest('path-address-input')).element.value).toBe(actualFile);
     await entry().trigger('click');
     expect(entry().attributes('aria-pressed')).toBe('false');
+    expect(wrapper.get<HTMLInputElement>(byTest('path-address-input')).element.value).toBe(folder);
     await entry().trigger('click');
+    await wrapper.get(byTest('session-title-trigger')).trigger('click');
     await wrapper.get(byTest('session-title-input')).setValue('文件检查');
+    await key(wrapper.get(byTest('session-title-input')).element, 'Enter');
     await wrapper.get(byTest('confirm-create-session-btn')).trigger('click');
     await flushPromises();
     const posts = fetchImpl.mock.calls.filter(([url, init]) => url === '/api/sessions' && init?.method === 'POST');
@@ -243,14 +262,13 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     expect(wrapper.get('main').text()).toContain(actualFile);
   });
 
-  it('W1-05 根目录与键盘导航丢弃过期的成功及失败响应', async () => {
+  it('W1-05 地址栏与键盘导航丢弃过期的成功及失败响应', async () => {
     let older = deferred<FsBrowseResponse | Response>();
     let latest = deferred<FsBrowseResponse | Response>();
-    let racing = false;
     const { wrapper } = await setup({ browseAt: (path) => {
       if (path === folder) return child;
-      if (path === '/other') return latest.result;
-      if (path === '/safe' && racing) return older.result;
+      if (path === '/other' || path === '/other/recent') return latest.result;
+      if (path === '/older') return older.result;
       return browse;
     } });
     await openPicker(wrapper);
@@ -258,7 +276,7 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     expect(parent().element.disabled).toBe(true);
     const dialog = wrapper.get(byTest('path-picker-modal'));
     const link = () => wrapper.get(byTest('fs-entry-row'));
-    const manual = () => wrapper.get<HTMLInputElement>(byTest('manual-path-input'));
+    const manual = () => wrapper.get<HTMLInputElement>(byTest('path-address-input'));
     await manual().setValue('/safe/pasted.log');
     await key(wrapper.get(byTest('path-picker-modal')).element, 'Backspace');
     expect(manual().element.value).toBe('/safe/pasted.log');
@@ -271,59 +289,175 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     await key(link().element, 'Backspace');
     expect(link().attributes('data-entry-path')).toBe(folder);
 
-    const safe = () => wrapper.get(byTest('allowed-root-chip') + '[title="/safe"]');
-    const other = () => wrapper.get(byTest('allowed-root-chip') + '[title="/other"]');
-    racing = true;
-    await safe().trigger('click');
-    await other().trigger('click');
+    async function jump(path: string) {
+      await manual().setValue(path);
+      await key(manual().element, 'Enter');
+    }
+    await jump('/older');
+    await jump('/other');
     latest.resolve({ ...browse, currentPath: '/other', entries: [] });
     await flushPromises();
-    expect(dialog.text()).toContain('/other');
+    expect(manual().element.value).toBe('/other');
     older.resolve(problem(403, 'PATH_OUTSIDE_ALLOWED_ROOTS'));
     await flushPromises();
     expect(dialog.find(byTest('path-error-banner')).exists()).toBe(false);
-    expect(wrapper.get(byTest('current-path')).text()).toBe('/other');
+    expect(manual().element.value).toBe('/other');
     older = deferred();
     latest = deferred();
-    await safe().trigger('click');
-    await other().trigger('click');
-    latest.resolve({ ...browse, currentPath: '/other/recent' });
-    await flushPromises();
+    await jump('/older');
+    await manual().setValue('/other/recent');
     older.resolve(browse);
     await flushPromises();
-    expect(wrapper.get(byTest('current-path')).text()).toBe('/other/recent');
+    expect(manual().element.value).toBe('/other/recent');
+    await key(manual().element, 'Enter');
+    latest.resolve({ ...browse, currentPath: '/other/recent' });
+    await flushPromises();
+    expect(manual().element.value).toBe('/other/recent');
   });
 
-  it('W1-06 按 403、404、503 和 400 区分路径错误，并直接提交手动路径', async () => {
+  it('W1-06 按 403、404、503 和 400 区分路径错误，验证后原样提交手动路径', async () => {
     const checks = [
       [403, 'PATH_OUTSIDE_ALLOWED_ROOTS', 'forbidden', '白名单'],
+      [403, 'PATH_FORBIDDEN', 'forbidden', '敏感文件或目录'],
       [404, 'PATH_NOT_FOUND', 'not-found', '不存在'],
       [503, 'NO_ACCESSIBLE_ROOTS', 'unavailable', '未配置'],
       [400, 'INVALID_PATH', 'invalid', '无效'],
+      [400, 'UNSUPPORTED_TRACE_FILE', 'invalid', '不支持该文件类型'],
     ] as const;
+    const manual = 'D:\\scope\\轨迹 #2.jsonl';
     const { wrapper, fetchImpl } = await setup({ browseAt: (path) => {
-      const match = checks.find(([status]) => path === 'bad-' + status);
+      const match = checks.find(([, code]) => path === 'bad-' + code);
+      if (path === manual) return { ...browse, selectedFile: manual };
       return match ? problem(match[0], match[1]) : browse;
     } });
     await openPicker(wrapper);
-    const input = () => wrapper.get(byTest('manual-path-input'));
-    for (const [status, , severity, message] of checks) {
-      await input().setValue('bad-' + status);
-      await wrapper.get(byTest('browse-manual-path-btn')).trigger('click');
-      await flushPromises();
+    const input = () => wrapper.get(byTest('path-address-input'));
+    for (const [status, code, severity, message] of checks) {
+      await input().setValue('bad-' + code);
+      await key(input().element, 'Enter');
       const banner = wrapper.get(byTest('path-error-banner'));
       expect(banner.attributes('role')).toBe('alert');
       expect(banner.text()).toContain(String(status));
       expect(banner.text()).toContain(message);
+      expect(banner.attributes('data-error-code')).toBe(code);
       expect(input().classes()).toContain('uiv-path-input--' + severity);
+      expect(wrapper.get<HTMLButtonElement>(byTest('confirm-create-session-btn')).element.disabled).toBe(true);
     }
-    const manual = 'D:\\scope\\轨迹 #2.jsonl';
     await input().setValue('  ' + manual + '  ');
+    await key(input().element, 'Enter');
+    expect(sessionPosts(fetchImpl)).toEqual([]);
     await wrapper.get(byTest('confirm-create-session-btn')).trigger('click');
     await flushPromises();
     const post = fetchImpl.mock.calls.find(([url, init]) => url === '/api/sessions' && init?.method === 'POST');
     expect(JSON.parse(String(post?.[1]?.body))).toEqual({ targetPath: manual });
     expect(wrapper.get('main').text()).toContain(manual);
+  });
+
+  it('U1-04/05 只在顶栏编辑标题，Escape 恢复焦点，空白和默认标题使用自动命名', async () => {
+    const { wrapper, fetchImpl } = await setup({ sessions: [] });
+    await openPicker(wrapper);
+    const dialog = () => wrapper.get(byTest('path-picker-modal'));
+    const trigger = () => dialog().get<HTMLButtonElement>(byTest('session-title-trigger'));
+    expect(dialog().find(byTest('allowed-root-chip')).exists()).toBe(false);
+    expect(dialog().find(byTest('browse-manual-path-btn')).exists()).toBe(false);
+    expect(dialog().find(byTest('session-title-input')).exists()).toBe(false);
+    expect(dialog().text()).not.toMatch(/前往|浏览此路径|会话标题（可选）/u);
+    expect(trigger().text()).toBe('新建排查会话');
+    expect(dialog().get('h2').attributes('id')).toBe(dialog().attributes('aria-labelledby'));
+    await trigger().trigger('click');
+    const input = () => dialog().get<HTMLInputElement>(byTest('session-title-input'));
+    expect(document.activeElement).toBe(input().element);
+    await input().setValue('  自定义会话  ');
+    await input().trigger('blur');
+    expect(trigger().text()).toBe('自定义会话');
+    await trigger().trigger('click');
+    expect([input().element.selectionStart, input().element.selectionEnd]).toEqual([0, '自定义会话'.length]);
+    await input().setValue('取消此次修改');
+    await key(input().element, 'Escape');
+    expect(dialog().find(byTest('session-title-input')).exists()).toBe(false);
+    expect(trigger().text()).toBe('自定义会话');
+    expect(document.activeElement).toBe(trigger().element);
+    expect(sessionPosts(fetchImpl)).toEqual([]);
+    for (const value of ['新建排查会话', ' \t ']) {
+      await trigger().trigger('click');
+      await input().setValue(value);
+      await key(input().element, 'Enter');
+      expect(trigger().text()).toBe('新建排查会话');
+      await dialog().get(byTest('confirm-create-session-btn')).trigger('click');
+      await flushPromises();
+      await openPicker(wrapper);
+    }
+    expect(sessionPosts(fetchImpl)).toEqual([{ targetPath: '/safe' }, { targetPath: '/safe' }]);
+  });
+
+  it('U1-06 粘贴和失焦立即跳转，输入和组合态按 350ms 防抖，关闭清理定时器', async () => {
+    const { wrapper, fetchImpl } = await setup({ browseAt: (path) => path ? { ...child, currentPath: path } : browse });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await openPicker(wrapper);
+      const address = () => wrapper.get<HTMLInputElement>(byTest('path-address-input'));
+      function addressed() {
+        return fetchImpl.mock.calls.map(([url]) => new URL(String(url), 'http://localhost'))
+          .filter((url) => url.pathname === '/api/fs/browse' && url.searchParams.has('resolveFile'))
+          .map((url) => [url.searchParams.get('path'), url.searchParams.get('resolveFile')]);
+      }
+      await paste(address().element, '/pasted');
+      expect(addressed()).toEqual([['/pasted', '1']]);
+      expect(wrapper.get(byTest('fs-entry-row')).text()).toContain('display-file');
+      const summary = () => wrapper.get(byTest('path-selection-summary'));
+      expect(summary().text()).toContain('目录');
+      await address().setValue('/delayed');
+      expect(summary().text()).toContain('delayed');
+      await vi.advanceTimersByTimeAsync(349);
+      expect(addressed()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(addressed().at(-1)).toEqual(['/delayed', '1']);
+      await address().trigger('compositionstart');
+      await address().setValue('/组合');
+      await key(address().element, 'Enter');
+      await vi.advanceTimersByTimeAsync(400);
+      expect(addressed()).toHaveLength(2);
+      await address().trigger('compositionend');
+      await vi.advanceTimersByTimeAsync(350);
+      expect(addressed().at(-1)).toEqual(['/组合', '1']);
+      await address().setValue('/blurred');
+      await address().trigger('blur', { relatedTarget: wrapper.get(byTest('fs-entry-row')).element });
+      await flushPromises();
+      expect(addressed().at(-1)).toEqual(['/blurred', '1']);
+      await address().setValue('/not-requested');
+      await wrapper.get(byTest('path-picker-cancel')).trigger('click');
+      await vi.advanceTimersByTimeAsync(400);
+      expect(addressed()).toHaveLength(4);
+      expect(sessionPosts(fetchImpl)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('U1-07 粘贴文件时高亮精确路径，电脑根不可创建会话', async () => {
+    const { wrapper, fetchImpl } = await setup({ browseAt: (path) => {
+      if (path === actualFile) return { ...child, selectedFile: actualFile };
+      if (path === COMPUTER_ROOT_PATH) return { currentPath: path, parentPath: null, allowedRoots: ['/safe'], entries: [
+        { name: '盘符', path: '/safe', kind: 'dir' },
+      ] };
+      return { ...browse, parentPath: COMPUTER_ROOT_PATH };
+    } });
+    await openPicker(wrapper);
+    const address = () => wrapper.get<HTMLInputElement>(byTest('path-address-input'));
+    const parent = () => wrapper.get(byTest('path-parent-btn'));
+    await parent().trigger('click');
+    await flushPromises();
+    expect(address().element.value).toBe('');
+    expect(wrapper.get(byTest('path-selection-summary')).text()).toContain('未选择');
+    expect(wrapper.get<HTMLButtonElement>(byTest('confirm-create-session-btn')).element.disabled).toBe(true);
+    await paste(address().element, actualFile);
+    expect(address().element.value).toBe(actualFile);
+    expect(wrapper.get(byTest('fs-entry-row')).attributes('aria-pressed')).toBe('true');
+    expect(wrapper.get(byTest('path-selection-summary')).text()).toContain('单文件');
+    expect(sessionPosts(fetchImpl)).toEqual([]);
+    await wrapper.get(byTest('confirm-create-session-btn')).trigger('click');
+    await flushPromises();
+    expect(sessionPosts(fetchImpl)).toEqual([{ targetPath: actualFile }]);
   });
 
   it('W1-07 按标题或路径筛选，斜杠聚焦，重挂载恢复最近选中项', async () => {
@@ -434,8 +568,15 @@ describe('F09_SESSION_SIDEBAR_UI 工作台浏览器交互', () => {
     expect(wrapper.get('main').text()).toContain(path);
     await openPicker(wrapper);
     expect(wrapper.get(byTest('fs-entry-row')).text()).toContain(name);
-    expect(wrapper.get(byTest('current-path')).text()).toBe(path);
-    expect(wrapper.findAll('script, img')).toHaveLength(0);
+    expect(wrapper.get<HTMLInputElement>(byTest('path-address-input')).element.value).toBe(path);
+    await wrapper.get(byTest('session-title-trigger')).trigger('click');
+    await wrapper.get(byTest('session-title-input')).setValue(title);
+    await key(wrapper.get(byTest('session-title-input')).element, 'Enter');
+    expect(wrapper.get(byTest('session-title-trigger')).text()).toBe(title);
+    expect(wrapper.get(byTest('path-selection-summary')).get('[title]').attributes('title')).toBe(path);
+    await wrapper.get(byTest('fs-entry-row')).trigger('click');
+    expect(wrapper.get(byTest('path-selection-summary')).text()).toContain(name);
+    expect(wrapper.findAll('script, img, iframe')).toHaveLength(0);
     await key(window, 'Escape');
     await item.get(byTest('session-delete-btn')).trigger('click');
     const deletion = wrapper.get(byTest('delete-session-alert'));

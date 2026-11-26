@@ -69,6 +69,17 @@ describe('M3.1 API Client', () => {
     expect(client.buildRunStreamUrl(run.id)).toBe('/api/runs/run_fixture/stream');
   });
 
+  it('U1-03 编码文件定位查询并校验可选选中文件', async () => {
+    const { client, fetchImpl } = fixtureClient();
+    const path = 'D:\\轨迹目录\\a b?#.jsonl';
+    const selected = { ...browse, selectedFile: path };
+    fetchImpl.mockResolvedValueOnce(Response.json(selected))
+      .mockResolvedValueOnce(Response.json({ ...browse, selectedFile: ' \t ' }));
+    expect(await client.browseFs(path, { resolveFile: true })).toEqual(selected);
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('/api/fs/browse?' + new URLSearchParams({ path, resolveFile: '1' }));
+    await expect(client.browseFs(path, { resolveFile: true })).rejects.toMatchObject({ name: 'ZodError' });
+  });
+
   it('W1-02 保留后端结构化错误并区分无效响应和网络故障', async () => {
     const { client, fetchImpl } = fixtureClient();
     for (const [status, code] of [[403, 'PATH_OUTSIDE_ALLOWED_ROOTS'], [404, 'PATH_NOT_FOUND'],

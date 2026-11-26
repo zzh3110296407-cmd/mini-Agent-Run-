@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { CreateSessionRequest, FsBrowseEntry } from '@mini-agent-run/shared';
+import { COMPUTER_ROOT_PATH, type CreateSessionRequest, type FsBrowseEntry } from '@mini-agent-run/shared';
 import { computed, nextTick, onUnmounted, ref, useId, watch } from 'vue';
 import { usePathBrowser, type PathError } from '../../composables/usePathBrowser';
 import { isTextEntry } from '../../utils/isTextEntry';
@@ -10,63 +10,213 @@ import UiIcon from '../ui/UiIcon.vue';
 
 const props = defineProps<{ open: boolean; creating: boolean; creationError: PathError | null }>();
 const emit = defineEmits<{ close: []; confirm: [input: CreateSessionRequest]; clearError: [] }>();
-const { browseState, loading, errorState, selectedPath, browse, selectRoot, goParent, reset } = usePathBrowser();
-const manualPath = ref('');
+const { browseState, loading, errorState, selectedPath, browse, cancelBrowse, reset } = usePathBrowser();
+const defaultTitle = '新建排查会话';
+const address = ref('');
 const sessionTitle = ref('');
+const titleDraft = ref('');
+const editingTitle = ref(false);
+const titleInput = ref<HTMLInputElement | null>(null);
+const titleTrigger = ref<HTMLButtonElement | null>(null);
 const list = ref<HTMLElement | null>(null);
 const inputId = useId();
-const targetPath = computed(() => manualPath.value.trim() || (selectedPath.value ?? browseState.value?.currentPath ?? ''));
+const computerView = computed(() => browseState.value?.currentPath === COMPUTER_ROOT_PATH);
+const targetPath = computed(() => selectedPath.value ?? (computerView.value ? '' : browseState.value?.currentPath ?? ''));
+const confirmedPath = computed(() => Boolean(targetPath.value) && address.value.trim() === targetPath.value
+  && !loading.value && !errorState.value);
+const targetKind = computed(() => confirmedPath.value ? (selectedPath.value ? '单文件' : '目录') : '未选择');
+const targetName = computed(() => {
+  const path = address.value.trim();
+  if (path === selectedPath.value) {
+    const selected = browseState.value?.entries.find((entry) => entry.path === path);
+    if (selected) return selected.name;
+  }
+  return path.split(/[/\\]/).filter(Boolean).at(-1) ?? path;
+});
 const displayedError = computed(() => props.creationError ?? errorState.value);
 const errorClass = computed(() => displayedError.value?.severity.replace('_', '-'));
-const canSubmit = computed(() => Boolean(targetPath.value) && !props.creating && (!loading.value || manualPath.value.trim() !== ''));
+const canSubmit = computed(() => confirmedPath.value && !props.creating);
+let addressTimer: ReturnType<typeof setTimeout> | undefined;
+let addressComposing = false;
+let pendingAddress: { path: string } | undefined;
+let pointerNavigation: Element | null = null;
 
 watch(() => props.open, (open) => {
+  stopAddressWork();
   reset();
-  manualPath.value = '';
+  address.value = '';
   sessionTitle.value = '';
-  if (open) void browse();
+  editingTitle.value = false;
+  addressComposing = false;
+  if (open) void loadDirectory();
 }, { immediate: true });
-onUnmounted(reset);
+onUnmounted(() => {
+  stopAddressWork();
+  reset();
+});
 
 function clearError() {
   errorState.value = null;
   emit('clearError');
 }
 
+function stopTimer() {
+  clearTimeout(addressTimer);
+  addressTimer = undefined;
+}
+
+function stopAddressWork() {
+  stopTimer();
+  clearPointerNavigation();
+  pendingAddress = undefined;
+  cancelBrowse();
+}
+
+function close() {
+  stopAddressWork();
+  emit('close');
+}
+
+async function loadDirectory(path?: string) {
+  if (!await browse(path)) return false;
+  address.value = targetPath.value;
+  return true;
+}
+
+function updateAddress(value: string) {
+  if (value !== address.value) stopAddressWork();
+  address.value = value;
+  clearError();
+}
+
+async function jumpToAddress() {
+  stopTimer();
+  const path = address.value.trim();
+  if (addressComposing || props.creating || !path || path === targetPath.value || path === pendingAddress?.path) return;
+  const request = { path };
+  pendingAddress = request;
+  if (await browse(path, { resolveFile: true })) address.value = targetPath.value;
+  if (pendingAddress === request) pendingAddress = undefined;
+}
+
+function scheduleAddress(event: Event) {
+  const input = event.target as HTMLInputElement;
+  updateAddress(input.value);
+  stopTimer();
+  if (addressComposing || (event instanceof InputEvent && event.isComposing)) return;
+  const path = address.value.trim();
+  if (path && path !== targetPath.value && path !== pendingAddress?.path) {
+    addressTimer = setTimeout(() => void jumpToAddress(), 350);
+  }
+}
+
+function pasteAddress(event: ClipboardEvent) {
+  const input = event.target as HTMLInputElement;
+  stopTimer();
+  if (event.clipboardData) {
+    event.preventDefault();
+    input.setRangeText(event.clipboardData.getData('text/plain'), input.selectionStart ?? 0,
+      input.selectionEnd ?? input.value.length, 'end');
+    updateAddress(input.value);
+    void jumpToAddress();
+    return;
+  }
+  addressTimer = setTimeout(() => {
+    updateAddress(input.value);
+    void jumpToAddress();
+  }, 0);
+}
+
+function startComposition() {
+  addressComposing = true;
+  stopAddressWork();
+}
+
+function finishComposition(event: CompositionEvent) {
+  addressComposing = false;
+  scheduleAddress(event);
+}
+
+function addressEnter(event: KeyboardEvent) {
+  if (!event.isComposing) void jumpToAddress();
+}
+
+function addressBlur(event: FocusEvent) {
+  const isPointerNavigation = pointerNavigation !== null && event.relatedTarget === pointerNavigation;
+  clearPointerNavigation();
+  if (isPointerNavigation) return;
+  void jumpToAddress();
+}
+
+function clearPointerNavigation() {
+  pointerNavigation = null;
+}
+
+function handlePointerDown(event: PointerEvent) {
+  if (!(event.target instanceof Element) || event.button !== 0) return;
+  pointerNavigation = event.target.closest(
+    '[data-testid="fs-entry-row"], [data-testid="path-parent-btn"], [data-testid="path-picker-cancel"], button[aria-label="关闭"]',
+  );
+  if (pointerNavigation) stopTimer();
+}
+
+async function editTitle() {
+  titleDraft.value = sessionTitle.value;
+  editingTitle.value = true;
+  await nextTick();
+  titleInput.value?.focus();
+  titleInput.value?.select();
+}
+
+function commitTitle() {
+  if (!editingTitle.value) return;
+  const title = titleDraft.value.trim();
+  sessionTitle.value = title === defaultTitle ? '' : title;
+  editingTitle.value = false;
+}
+
+async function finishTitle(event: KeyboardEvent) {
+  if (event.isComposing) return;
+  if (event.key === 'Enter') commitTitle();
+  else editingTitle.value = false;
+  await nextTick();
+  titleTrigger.value?.focus();
+}
+
 function rows() {
   return Array.from(list.value?.querySelectorAll<HTMLButtonElement>('[data-testid="fs-entry-row"]') ?? []);
 }
 
-async function openDirectory(action: () => Promise<boolean>) {
-  manualPath.value = '';
+async function openDirectory(path: string) {
+  stopAddressWork();
   clearError();
-  if (!await action()) return;
+  address.value = path === COMPUTER_ROOT_PATH ? '' : path;
+  if (!await loadDirectory(path)) return;
   await nextTick();
   rows()[0]?.focus();
 }
 
-function navigate(entry: FsBrowseEntry) {
-  if (entry.kind === 'dir') {
-    void openDirectory(() => browse(entry.path));
-  } else if (!loading.value) {
-    manualPath.value = '';
-    clearError();
-    selectedPath.value = selectedPath.value === entry.path ? null : entry.path;
-  }
+function goParent() {
+  const parent = browseState.value?.parentPath;
+  if (parent != null) void openDirectory(parent);
 }
 
-function browseManual() {
-  const path = manualPath.value.trim();
-  if (!path) return;
-  clearError();
-  void browse(path);
+function navigate(entry: FsBrowseEntry) {
+  if (entry.kind === 'dir') {
+    void openDirectory(entry.path);
+  } else {
+    stopAddressWork();
+    clearError();
+    selectedPath.value = selectedPath.value === entry.path ? null : entry.path;
+    address.value = targetPath.value;
+  }
 }
 
 function handleNavigation(event: KeyboardEvent) {
   if (event.isComposing || event.defaultPrevented || props.creating || isTextEntry(event.target)) return;
   if (event.key === 'Backspace') {
     event.preventDefault();
-    if (browseState.value?.parentPath != null) void openDirectory(goParent);
+    goParent();
     return;
   }
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Enter') return;
@@ -88,35 +238,55 @@ function handleNavigation(event: KeyboardEvent) {
 
 function submit() {
   if (!canSubmit.value) return;
+  commitTitle();
   clearError();
-  const title = sessionTitle.value.trim();
+  const title = sessionTitle.value;
   emit('confirm', { targetPath: targetPath.value, ...(title ? { title } : {}) });
 }
 </script>
 
 <template>
   <UiDialog
-    :open="open" title="新建排查会话" data-testid="path-picker-modal" :aria-busy="creating"
-    style="--dialog-width: 620px" @close="emit('close')" @keydown="handleNavigation"
+    :open="open" :title="defaultTitle" data-testid="path-picker-modal" :aria-busy="creating"
+    style="--dialog-width: 620px" @close="close" @keydown="handleNavigation"
+    @pointerdown.capture="handlePointerDown" @pointerup.capture="clearPointerNavigation"
+    @pointercancel.capture="clearPointerNavigation"
   >
-    <form :id="inputId + '-form'" class="path-form" @submit.prevent="submit">
-      <div v-if="browseState?.allowedRoots.length" class="roots" aria-label="允许的根目录">
-        <UiButton
-          v-for="root in browseState.allowedRoots" :key="root" size="sm"
-          :variant="browseState.currentPath === root ? 'subtle' : 'default'"
-          data-testid="allowed-root-chip" :title="root" :aria-pressed="browseState.currentPath === root"
-          :disabled="creating" @click="openDirectory(() => selectRoot(root))"
-        ><UiIcon name="folder" :size="14" /><span class="root-path">{{ root }}</span></UiButton>
+    <template #title="{ titleId }">
+      <div class="title-editor">
+        <h2 :id="titleId" class="picker-title">
+          <button
+            v-if="!editingTitle" ref="titleTrigger" type="button" class="title-trigger"
+            data-testid="session-title-trigger" title="点击自定义会话标题" :disabled="creating" @click="editTitle"
+          ><span>{{ sessionTitle || defaultTitle }}</span><UiIcon name="pencil" :size="13" /></button>
+          <span v-else class="sr-only">{{ sessionTitle || defaultTitle }}</span>
+        </h2>
+        <input
+          v-if="editingTitle" ref="titleInput" v-model="titleDraft" class="field-input title-input"
+          data-testid="session-title-input" aria-label="会话标题" :disabled="creating"
+          placeholder="留空则默认使用文件夹或文件名" @blur="commitTitle"
+          @keydown.enter.stop.prevent="finishTitle" @keydown.esc.stop.prevent="finishTitle"
+        >
       </div>
+    </template>
+    <form :id="inputId + '-form'" class="path-form" @submit.prevent="submit">
       <div class="browser" :aria-busy="loading">
-        <div class="breadcrumb">
+        <div class="address-bar">
           <UiButton
             size="sm" variant="ghost" aria-label="返回上级目录" title="返回上级目录"
             data-testid="path-parent-btn" :disabled="browseState?.parentPath == null || creating"
-            @click="openDirectory(goParent)"
+            @click="goParent"
           ><UiIcon name="corner-left-up" /></UiButton>
-          <code v-if="browseState" data-testid="current-path" :title="browseState.currentPath">{{ browseState.currentPath }}</code>
-          <span v-else class="muted">目录浏览</span>
+          <input
+            :id="inputId" :value="address" class="field-input uiv-path-input" data-testid="path-address-input"
+            :class="errorClass ? 'uiv-path-input--' + errorClass : undefined" :aria-invalid="Boolean(displayedError)"
+            :aria-describedby="displayedError ? inputId + '-error' : undefined" :disabled="creating"
+            :placeholder="computerView ? '选择盘符或粘贴路径' : '输入或粘贴文件夹或文件路径'"
+            aria-label="文件或目录路径" spellcheck="false" autocomplete="off" data-autofocus
+            @input="scheduleAddress" @paste="pasteAddress" @keydown.enter.stop.prevent="addressEnter" @blur="addressBlur"
+            @keydown.tab="clearPointerNavigation"
+            @compositionstart="startComposition" @compositionend="finishComposition"
+          >
           <span v-if="loading" class="muted" role="status">读取中…</span>
         </div>
         <div ref="list" class="entries" aria-label="目录内容">
@@ -140,50 +310,44 @@ function submit() {
         v-if="displayedError" :id="inputId + '-error'" class="uiv-path-error" :class="'uiv-path-error--' + errorClass"
         role="alert" data-testid="path-error-banner" :data-error-code="displayedError.code"
       ><strong v-if="displayedError.status">{{ displayedError.status }} · </strong>{{ displayedError.message }}</p>
-      <div class="field">
-        <label :for="inputId">手动输入路径</label>
-        <div class="path-input-row">
-          <input
-            :id="inputId" v-model="manualPath" class="field-input uiv-path-input" data-testid="manual-path-input"
-            :class="errorClass ? 'uiv-path-input--' + errorClass : undefined" :aria-invalid="Boolean(displayedError)"
-            :aria-describedby="displayedError ? inputId + '-error' : undefined" :disabled="creating"
-            spellcheck="false" autocomplete="off" placeholder="粘贴绝对或相对路径" @input="clearError"
-          >
-          <UiButton data-testid="browse-manual-path-btn" :disabled="!manualPath.trim() || creating" @click="browseManual">
-            浏览此路径
-          </UiButton>
-        </div>
-      </div>
-      <div class="field">
-        <label :for="inputId + '-title'">会话标题 <span class="muted">（可选）</span></label>
-        <input
-          :id="inputId + '-title'" v-model="sessionTitle" data-testid="session-title-input" class="field-input"
-          :disabled="creating" placeholder="默认使用文件夹或文件名"
-        >
-      </div>
     </form>
     <template #footer>
-      <UiButton variant="ghost" :disabled="creating" @click="emit('close')">取消</UiButton>
-      <UiButton
-        variant="primary" type="submit" :form="inputId + '-form'" data-testid="confirm-create-session-btn"
-        :disabled="!canSubmit" @click.prevent="submit"
-      >{{ creating ? '正在创建…' : '创建会话' }}</UiButton>
+      <div class="selection-summary" data-testid="path-selection-summary">
+        <span class="selection-kind" :class="{ 'selection-kind--confirmed': confirmedPath }">{{ targetKind }}</span>
+        <span class="selection-name" :title="address.trim()">{{ targetName }}</span>
+      </div>
+      <div class="footer-actions">
+        <UiButton variant="ghost" data-testid="path-picker-cancel" :disabled="creating" @click="close">取消</UiButton>
+        <UiButton
+          variant="primary" type="submit" :form="inputId + '-form'" data-testid="confirm-create-session-btn"
+          :disabled="!canSubmit" @click.prevent="submit"
+        >{{ creating ? '正在创建…' : '创建会话' }}</UiButton>
+      </div>
     </template>
   </UiDialog>
 </template>
 
 <style scoped>
 .path-form { display: grid; gap: 12px; }
-.roots { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.roots button { max-width: 100%; }
-.root-path, .breadcrumb code, .fs-entry span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.root-path, .breadcrumb code { font-family: var(--font-mono); }
-.browser { min-width: 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-muted); }
-.breadcrumb {
-  display: flex; align-items: center; gap: 7px; padding: 5px 8px; min-width: 0;
-  border-bottom: 1px solid var(--border-subtle); color: var(--text-code);
+.title-editor { flex: 1; min-width: 0; }
+.picker-title { margin: 0; font-size: 15px; font-weight: 600; }
+.title-trigger {
+  display: inline-flex; align-items: center; gap: 7px; max-width: 100%; min-height: 29px;
+  padding: 0 6px; border-radius: var(--radius-sm); color: var(--text-primary); font-weight: 600; text-align: left;
 }
-.breadcrumb button, .breadcrumb [role="status"] { flex: none; }
+.title-trigger:hover:not(:disabled) { background: var(--bg-hover); }
+.title-trigger svg { color: var(--text-secondary); flex: none; }
+.title-input { width: min(100%, 360px); min-height: 29px; padding-block: 3px; }
+.title-trigger span, .fs-entry span, .selection-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.browser { min-width: 0; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-muted); }
+.address-bar {
+  display: flex; align-items: center; gap: 7px; padding: 5px 8px; min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.address-bar input { flex: 1; min-width: 0; }
+.address-bar button, .address-bar [role="status"] { flex: none; }
 .entries { display: grid; padding: 5px; min-height: 65px; max-height: clamp(88px, 34dvh, 270px); overflow: auto; }
 .fs-entry {
   display: flex; align-items: center; gap: 8px; text-align: left; min-height: 31px; padding: 3px 8px;
@@ -195,8 +359,14 @@ function submit() {
 .fs-entry.selected { background: var(--accent-soft-bg); border-color: var(--accent-soft-border); }
 .fs-entry.selected svg { color: var(--accent-soft-fg); }
 .entry-end { margin-inline-start: auto; }
-.field { display: grid; gap: 5px; }
-.field label { font-weight: 550; }
-.path-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.selection-summary, .footer-actions { display: flex; align-items: center; gap: 8px; }
+.selection-summary { flex: 1; min-width: 0; }
+.selection-kind {
+  flex: none; padding: 2px 6px; border-radius: var(--radius-sm);
+  color: var(--text-secondary); background: var(--bg-muted); font-size: 12px;
+}
+.selection-kind--confirmed { color: var(--accent-soft-fg); background: var(--accent-soft-bg); }
+.selection-name { color: var(--text-secondary); font: 12px var(--font-mono); }
+.footer-actions { flex: none; }
 .muted { color: var(--text-secondary); font-size: 12px; }
 </style>
